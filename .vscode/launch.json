@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "lava-farm (macOS debug)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "macos",
+      "flutterMode": "debug",
+      "args": []
+    },
+    {
+      "name": "lava-farm (macOS profile)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "macos",
+      "flutterMode": "profile",
+      "args": []
+    },
+    {
+      "name": "lava-farm (macOS release)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "macos",
+      "flutterMode": "release",
+      "args": []
+    },
+    {
+      "name": "Run all tests",
+      "type": "dart",
+      "request": "launch",
+      "program": "test/",
+      "deviceId": "macos",
+      "flutterMode": "debug",
+      "args": []
+    }
+  ]
+}

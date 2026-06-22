@@ -1,0 +1,57 @@
+# lava-farm Mosquitto MQTT Broker — Docker Compose 生产部署
+# 适用: NAS, Linux 服务器, Mac mini, Windows WSL2
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 日志: docker compose logs -f mosquitto
+
+version: '3.8'
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: lava-farm-broker
+    restart: always
+
+    # host 网络模式：容器直接使用宿主机网络栈
+    # 优点: 零 NAT 延迟，打印机直接连宿主机 IP
+    # 注意: host 模式下 ports 映射无效
+    network_mode: host
+
+    volumes:
+      # 配置文件只读挂载，防止容器内误改
+      - ./mosquitto/config:/mosquitto/config:ro
+      # 持久化数据（session 恢复、QoS 消息队列）
+      - ./mosquitto/data:/mosquitto/data
+      # 日志输出
+      - ./mosquitto/log:/mosquitto/log
+
+    # 日志轮转，防止磁盘占满
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 健康检查：每 30s 尝试订阅 $SYS topic 验证 Broker 是否正常响应
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mosquitto_sub",
+          "-h", "localhost",
+          "-t", "$$SYS/broker/version",
+          "-C", "1",
+          "-W", "3",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # 资源限制（100 打印机场景足够）
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M

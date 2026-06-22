@@ -1,0 +1,22 @@
+name: lava_farm
+description: 局域网 3D 打印机群控桌面端 — 基于独立 MQTT Broker + Moonraker 协议
+version: 0.1.0
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.4.0
+  flutter_secure_storage: ^9.0.0
+  mqtt_client: ^10.5.1
+  typed_data: ^1.4.0
+  # lava_device_sdk:  # 单机 SDK（共享协议层）
+  #   path: ../lava_device_sdk
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  test: ^1.24.0
+  flutter_lints: ^3.0.0

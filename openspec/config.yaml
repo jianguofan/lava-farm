@@ -1,0 +1,22 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Flutter Desktop (macOS/Windows/Linux), Dart, Riverpod, Hive
+  Protocol: Moonraker HTTP API (port 7125) + JSON-RPC 2.0 + MQTT
+  Target scale: up to 100 printers on LAN
+  Dependencies: lava_device_sdk (DeviceClient, MoonrakerAdapter, MqttTransport)
+  External: Mosquitto MQTT Broker (spawned as child process)
+  Printers: Snapmaker with Moonraker (u1-moonraker)
+  Reference architectures: FDM Monster (batch Fan-Out), OctoFarm (SSE polling)
+  Existing single-device architecture: flutter_zero_copy DEVICE_ARCHITECTURE.md
+
+rules:
+  proposal:
+    - Keep proposals under 600 words
+    - Always include a "Non-goals" section
+  design:
+    - Use Mermaid diagrams for architecture
+    - Reference existing patterns from DEVICE_ARCHITECTURE.md where applicable
+  tasks:
+    - Break tasks into chunks of max 4 hours
+    - Order by dependency

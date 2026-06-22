@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>群控桌面端架构图</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    h1 {
+      color: #64ffda;
+      margin-bottom: 8px;
+      font-size: 24px;
+    }
+    .subtitle {
+      color: #8892b0;
+      margin-bottom: 24px;
+      font-size: 14px;
+    }
+    .diagram-container {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 30px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+      width: 100%;
+      max-width: 1100px;
+    }
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+    .legend {
+      margin-top: 24px;
+      padding: 16px;
+      background: #0f3460;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+    .legend strong { color: #64ffda; }
+  </style>
+</head>
+<body>
+  <h1>🖥️ Lava Farm — 群控桌面端架构图</h1>
+  <p class="subtitle">数据流向: 群控桌面 → Broker → Moonraker → MQTT → 打印机设备</p>
+
+  <div class="diagram-container">
+    <div class="mermaid">
+graph TB
+    classDef desktop fill:#1a237e,stroke:#5c6bc0,stroke-width:2px,color:#c5cae9
+    classDef broker fill:#004d40,stroke:#26a69a,stroke-width:2px,color:#b2dfdb
+    classDef moonraker fill:#4a148c,stroke:#ab47bc,stroke-width:2px,color:#e1bee7
+    classDef mqtt fill:#e65100,stroke:#ff9800,stroke-width:2px,color:#ffe0b2
+    classDef device fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#c8e6c9
+    classDef db fill:#263238,stroke:#78909c,stroke-width:2px,color:#cfd8dc
+
+    subgraph DESKTOP["🖥️ 群控桌面端 Control Desktop"]
+        UI["Web 管理面板"]
+        WS_CLIENT["WebSocket Client"]
+        CMD["指令下发模块"]
+        MONITOR["状态监控面板"]
+        BATCH["批量操作引擎"]
+    end
+
+    subgraph BROKER["📡 Broker 消息中间层"]
+        API["REST API Gateway"]
+        WS_SERVER["WebSocket Server"]
+        AUTH["认证鉴权 JWT / Token"]
+        ROUTER["消息路由 设备发现与注册"]
+        CACHE["Redis 缓存"]
+    end
+
+    subgraph MOONRAKER_CLUSTER["🌙 Moonraker 集群 - 每台打印机独立实例"]
+        M1["Moonraker API Server #1"]
+        K1["Klipper 固件 #1"]
+        M2["Moonraker API Server #2"]
+        K2["Klipper 固件 #2"]
+        M3["Moonraker API Server #3"]
+        K3["Klipper 固件 #3"]
+        M4["Moonraker API Server #N"]
+        K4["Klipper 固件 #N"]
+    end
+
+    subgraph MQTT_LAYER["📨 MQTT 消息队列"]
+        MQTT_BROKER["Mosquitto / EMQX MQTT Broker"]
+        TOPIC_CMD["Topic: printer/:id/command"]
+        TOPIC_STATE["Topic: printer/:id/state"]
+        TOPIC_EVENT["Topic: printer/:id/event"]
+    end
+
+    subgraph HARDWARE["🖨️ 硬件设备层"]
+        MCU1["MCU #1 STM32/Arduino"]
+        MCU2["MCU #2 STM32/Arduino"]
+        MCU3["MCU #3 STM32/Arduino"]
+        MCU4["MCU #N STM32/Arduino"]
+    end
+
+    subgraph STORAGE["💾 数据持久化"]
+        PG[("PostgreSQL 历史记录/配置")]
+        INFLUX[("InfluxDB 时序数据")]
+    end
+
+    UI -->|"HTTP REST"| API
+    WS_CLIENT <-->|"WebSocket"| WS_SERVER
+    CMD --> API
+    MONITOR <--> WS_SERVER
+    BATCH --> API
+
+    API --> AUTH
+    API --> ROUTER
+    WS_SERVER <--> ROUTER
+    ROUTER <--> CACHE
+
+    ROUTER -->|"HTTP API 调用"| M1
+    ROUTER -->|"HTTP API 调用"| M2
+    ROUTER -->|"HTTP API 调用"| M3
+    ROUTER -->|"HTTP API 调用"| M4
+
+    M1 --> K1
+    M2 --> K2
+    M3 --> K3
+    M4 --> K4
+
+    M1 -->|"发布状态"| MQTT_BROKER
+    M2 -->|"发布状态"| MQTT_BROKER
+    M3 -->|"发布状态"| MQTT_BROKER
+    M4 -->|"发布状态"| MQTT_BROKER
+
+    MQTT_BROKER -->|"订阅指令"| M1
+    MQTT_BROKER -->|"订阅指令"| M2
+    MQTT_BROKER -->|"订阅指令"| M3
+    MQTT_BROKER -->|"订阅指令"| M4
+
+    MQTT_BROKER --> TOPIC_CMD
+    MQTT_BROKER --> TOPIC_STATE
+    MQTT_BROKER --> TOPIC_EVENT
+
+    K1 -->|"串口/USB"| MCU1
+    K2 -->|"串口/USB"| MCU2
+    K3 -->|"串口/USB"| MCU3
+    K4 -->|"串口/USB"| MCU4
+
+    API --> PG
+    CACHE --> PG
+    MQTT_BROKER -->|"时序数据写入"| INFLUX
+
+    class UI,WS_CLIENT,CMD,MONITOR,BATCH desktop
+    class API,WS_SERVER,AUTH,ROUTER,CACHE broker
+    class M1,M2,M3,M4 moonraker
+    class K1,K2,K3,K4 device
+    class MQTT_BROKER,TOPIC_CMD,TOPIC_STATE,TOPIC_EVENT mqtt
+    class MCU1,MCU2,MCU3,MCU4 device
+    class PG,INFLUX db
+    </div>
+
+    <div class="legend">
+      <strong>数据流说明:</strong><br/>
+      🔵 <strong>蓝色</strong> — 群控桌面端: 用户操作入口, 多机管理/批量控制/实时监控<br/>
+      🟢 <strong>青色</strong> — Broker 中间层: 统一接入, 消息路由, 认证鉴权, 状态缓存<br/>
+      🟣 <strong>紫色</strong> — Moonraker: 每台打印机的 API Server, 对接 Klipper 固件<br/>
+      🟠 <strong>橙色</strong> — MQTT: 轻量级发布/订阅, 设备状态上报 & 指令下发<br/>
+      🟢 <strong>绿色</strong> — 硬件层: MCU 驱动步进电机/加热棒/传感器<br/>
+      ⬛ <strong>灰色</strong> — 持久化: 历史数据存储 & 时序监控数据<br/>
+      <br/>
+      <strong>核心链路:</strong> 桌面端 → Broker(路由/鉴权) → Moonraker(API) → MQTT(解耦) → Moonraker(订阅) → Klipper → MCU
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#1a237e',
+        primaryTextColor: '#e0e0e0',
+        primaryBorderColor: '#5c6bc0',
+        lineColor: '#546e7a',
+        secondaryColor: '#004d40',
+        tertiaryColor: '#4a148c',
+      },
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis',
+        padding: 20,
+      },
+    });
+  </script>
+</body>
+</html>
