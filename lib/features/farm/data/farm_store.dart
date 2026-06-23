@@ -44,8 +44,18 @@ class FarmStore {
   /// [status] 展开后的遥测数据
   /// [eventTime] 来自 Moonraker eventtime 字段的数据时间戳
   void onMqttStatus(String sn, Map<String, dynamic> status, {DateTime? eventTime}) {
-    final printer = _printers[sn];
-    if (printer == null) return;
+    // 首次收到消息 → 自动注册（无需预先入网）
+    var printer = _printers[sn];
+    if (printer == null) {
+      printer = FarmPrinterState.fromInfo(PrinterInfo(
+        sn: sn,
+        displayName: sn.substring(sn.length - 6), // 用 SN 后 6 位作为显示名
+        ip: 'MQTT',
+        port: 1883,
+        source: Source.mqtt,
+      ));
+      _printers[sn] = printer;
+    }
 
     // 时间戳保护：MQTT 消息可能乱序到达
     if (eventTime != null && printer.lastDataTimestamp != null) {
@@ -83,8 +93,18 @@ class FarmStore {
 
   /// MQTT 通知（Last Will 遗嘱消息）
   void onMqttNotification(String sn, Map<String, dynamic> data) {
-    final printer = _printers[sn];
-    if (printer == null) return;
+    // 首次收到消息 → 自动注册
+    var printer = _printers[sn];
+    if (printer == null) {
+      printer = FarmPrinterState.fromInfo(PrinterInfo(
+        sn: sn,
+        displayName: sn.substring(sn.length - 6),
+        ip: 'MQTT',
+        port: 1883,
+        source: Source.mqtt,
+      ));
+      _printers[sn] = printer;
+    }
 
     final event = data['server'] as String?;
     if (event == 'online') {

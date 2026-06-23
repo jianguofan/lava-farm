@@ -1,7 +1,8 @@
 /// 单打印机详情页 (T11.4)
 ///
 /// 显示内容:
-/// - 实时温度曲线（模拟）
+/// - 摄像头实时画面（CameraView 轮询）
+/// - 实时温度仪表
 /// - 打印进度条 + 预估剩余时间
 /// - 快照历史时间线
 /// - 手动控制面板（归零 / 移动轴 / 设置温度 / 发送 GCode）
@@ -9,9 +10,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/printer_info.dart';
+import '../widgets/camera_view.dart';
 
 /// 打印机详情页
 class PrinterDetailPage extends ConsumerWidget {
@@ -53,6 +56,15 @@ class PrinterDetailPage extends ConsumerWidget {
             // ── 区块 2: 温度仪表 ──
             _TemperatureSection(printer: printer),
             const SizedBox(height: 20),
+
+            // ── 区块 2.5: 摄像头实时画面 ──
+            if (printer.isOnline)
+              _CameraSection(
+                sn: printer.sn,
+                ip: printer.ip,
+                port: printer.port,
+              ),
+            if (printer.isOnline) const SizedBox(height: 20),
 
             // ── 区块 3: 打印进度 ──
             if (printer.isPrinting) ...[
@@ -507,6 +519,251 @@ class _SnapshotTimeline extends StatelessWidget {
     return '${dt.hour.toString().padLeft(2, '0')}:'
         '${dt.minute.toString().padLeft(2, '0')}:'
         '${dt.second.toString().padLeft(2, '0')}';
+  }
+}
+
+/// 摄像头实时画面区块
+///
+/// 发送 camera.start_monitor 命令给打印机，获取帧 URL，
+/// 然后通过 CameraView 轮询显示实时画面。
+class _CameraSection extends ConsumerStatefulWidget {
+  final String sn;
+  final String ip;
+  final int port;
+
+  const _CameraSection({
+    required this.sn,
+    required this.ip,
+    required this.port,
+  });
+
+  @override
+  ConsumerState<_CameraSection> createState() => _CameraSectionState();
+}
+
+class _CameraSectionState extends ConsumerState<_CameraSection> {
+  bool _isActive = false;
+  String? _frameUrl;
+  bool _isStarting = false;
+  String? _error;
+
+  /// 可用作摄像头 HTTP 请求的真实 IP（覆盖占位符如 'MQTT'）
+  late String _effectiveIp;
+  late final TextEditingController _ipController;
+
+  /// 检查 IP 是否为有效 IPv4 地址
+  bool get _ipIsValid {
+    final ip = _effectiveIp.trim();
+    return RegExp(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(ip);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _effectiveIp = widget.ip;
+    _ipController = TextEditingController(text: widget.ip);
+  }
+
+  @override
+  void dispose() {
+    _ipController.dispose();
+    _stopCamera();
+    super.dispose();
+  }
+
+  Future<void> _toggleCamera() async {
+    if (_isActive) {
+      await _stopCamera();
+    } else {
+      await _startCamera();
+    }
+  }
+
+  Future<void> _startCamera() async {
+    setState(() {
+      _isStarting = true;
+      _error = null;
+    });
+
+    final cameraService = ref.read(cameraServiceProvider);
+    if (cameraService == null) {
+      setState(() {
+        _isStarting = false;
+        _error = 'MQTT 未连接，无法发送摄像头命令';
+      });
+      return;
+    }
+
+    final result = await cameraService.startMonitor(
+      sn: widget.sn,
+      ip: _effectiveIp.trim(),
+      port: widget.port,
+    );
+
+    if (!mounted) return;
+
+    if (result.success && result.frameUrl != null) {
+      setState(() {
+        _frameUrl = result.frameUrl;
+        _isActive = true;
+        _isStarting = false;
+      });
+    } else {
+      setState(() {
+        _isStarting = false;
+        _error = result.error ?? '摄像头启动失败，请检查打印机是否支持摄像头';
+      });
+    }
+  }
+
+  Future<void> _stopCamera() async {
+    if (_frameUrl != null && _isActive) {
+      final cameraService = ref.read(cameraServiceProvider);
+      await cameraService?.stopMonitor(
+        sn: widget.sn,
+        ip: _effectiveIp.trim(),
+        port: widget.port,
+      );
+    }
+    if (mounted) {
+      setState(() {
+        _isActive = false;
+        _frameUrl = null;
+        _error = null;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 标题行 + 开关按钮
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('实时摄像头',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                _isActive
+                    ? TextButton.icon(
+                        onPressed: _toggleCamera,
+                        icon: const Icon(Icons.videocam_off, size: 18),
+                        label: const Text('关闭'),
+                        style: TextButton.styleFrom(foregroundColor: Colors.red),
+                      )
+                    : ElevatedButton.icon(
+                        onPressed: _isStarting ? null : _toggleCamera,
+                        icon: _isStarting
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2),
+                              )
+                            : const Icon(Icons.videocam, size: 18),
+                        label: Text(_isStarting ? '开启中...' : '开启实时摄像头'),
+                      ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // IP 输入（当设备记录的 IP 不是有效地址时显示）
+            if (!_ipIsValid)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.lan, size: 16, color: Colors.orange),
+                    const SizedBox(width: 8),
+                    const Text('设备 IP: ',
+                        style: TextStyle(fontSize: 13, color: Colors.orange)),
+                    SizedBox(
+                      width: 140,
+                      height: 32,
+                      child: TextField(
+                        controller: _ipController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          hintText: '如 172.18.4.46',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                          contentPadding:
+                              EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        ),
+                        style: const TextStyle(fontSize: 13),
+                        onChanged: (v) => setState(() => _effectiveIp = v),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // 错误信息
+            if (_error != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline,
+                        size: 18, color: Colors.red.shade700),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
+                            color: Colors.red.shade700, fontSize: 13),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _startCamera,
+                      child: const Text('重试', style: TextStyle(fontSize: 13)),
+                    ),
+                  ],
+                ),
+              ),
+
+            // 摄像头画面
+            if (_isActive && _frameUrl != null)
+              CameraView(
+                frameUrl: _frameUrl!,
+                isActive: _isActive,
+              ),
+
+            // 未激活时的占位提示
+            if (!_isActive && _error == null)
+              Container(
+                width: double.infinity,
+                height: 120,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.videocam, size: 40, color: Colors.grey.shade400),
+                    const SizedBox(height: 8),
+                    Text(
+                      '点击上方按钮开启摄像头实时画面',
+                      style: TextStyle(
+                          color: Colors.grey.shade500, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

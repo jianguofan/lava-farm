@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/broker_connection_manager.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
+import '../../data/camera_service.dart';
 import '../../data/farm_store.dart';
 import '../../data/mqtt_transport_impl.dart';
 import 'credential_store_provider.dart';
@@ -96,3 +97,10 @@ final brokerHealthStateProvider = Provider<BrokerHealthState>((ref) {
 
 /// HTTP 降级打印机数量
 final httpFallbackCountProvider = StateProvider<int>((ref) => 0);
+
+/// CameraService Provider — MQTT 发命令 + HTTP 轮询帧画面
+final cameraServiceProvider = Provider<CameraService?>((ref) {
+  final router = ref.watch(farmMqttRouterProvider);
+  if (router == null) return null;
+  return CameraService(router: router);
+});

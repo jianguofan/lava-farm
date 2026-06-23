@@ -259,6 +259,9 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
 
         // 注册预设设备
         _registerDemoDevices(store);
+
+        // 启动主动探活：每分钟对所有设备发 server.info 确认在线
+        _router!.startProbing();
       }
     } catch (e) {
       setState(() => _errorMessage = '连接失败: $e');

@@ -4,6 +4,7 @@
 /// - 连接到 Broker 后订阅通配符 topic (+/status, +/notification)
 /// - 解析收到的消息并路由到 FarmStore
 /// - 管理单设备 {SN}/response 的动态订阅（用于 JSON-RPC 请求-响应匹配）
+/// - 主动探活：周期性发送 server.info 确认设备在线（带 msg 的 MQTT 心跳本质相同但被动等待）
 ///
 /// 数据流:
 ///   MQTT +/status        → _handleStatus(sn, payload)    → FarmStore.onMqttStatus
@@ -24,8 +25,12 @@ class FarmMqttRouter {
   final MqttTransportAdapter _transport;
   final RequestTracker _tracker = RequestTracker();
 
-  /// 已订阅的设备响应 topic: Map<SN, Subscription>
+  /// 已订阅的设备响应 topic
   final Set<String> _responseSubscribed = {};
+
+  /// 主动探活定时器
+  Timer? _probeTimer;
+  static const _probeInterval = Duration(minutes: 1);
 
   FarmMqttRouter({
     required FarmStore store,
@@ -37,7 +42,7 @@ class FarmMqttRouter {
   // 启动 / 停止
   // ═══════════════════════════════════════════════════════════
 
-  /// 订阅通配符 topic，开始接收所有设备消息
+  /// 订阅通配符 topic，开始接收所有设备消息，启动主动探活
   Future<void> start() async {
     // 监听所有消息
     _transport.messageStream.listen(_onMessage);
@@ -47,8 +52,23 @@ class FarmMqttRouter {
     await _transport.subscribe('+/notification', qos: 1);
   }
 
+  /// 启动主动探活（在注册完设备后调用）
+  ///
+  /// 每隔 1 分钟对所有已知设备发送 server.info 查询：
+  /// - 有回复 → 确认在线 → 更新状态
+  /// - 无回复 → 由 FarmConnectionMonitor 累积判定离线（不单独一次就标离线）
+  void startProbing() {
+    _probeTimer?.cancel();
+    // 首次立即探一次
+    _probeAll();
+    // 后续每分钟一次
+    _probeTimer = Timer.periodic(_probeInterval, (_) => _probeAll());
+  }
+
   /// 停止路由
   Future<void> stop() async {
+    _probeTimer?.cancel();
+    _probeTimer = null;
     _tracker.clear();
     _responseSubscribed.clear();
   }
@@ -87,6 +107,42 @@ class FarmMqttRouter {
     await _transport.publish('$sn/request', payload, qos: 1);
 
     return future;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 主动探活
+  // ═══════════════════════════════════════════════════════════
+
+  /// 对所有已知设备发送 server.info 查询确认在线状态
+  Future<void> _probeAll() async {
+    final devices = _store.allPrinters;
+    if (devices.isEmpty) return;
+
+    for (final device in devices) {
+      // 不阻塞，逐个异步探测
+      _probeDevice(device.sn);
+    }
+  }
+
+  /// 对单台设备发送 server.info（极轻量，仅确认存活）
+  Future<void> _probeDevice(String sn) async {
+    try {
+      final response = await sendCommand(
+        sn,
+        'server.info',
+        null,
+      );
+      if (response != null && response['result'] != null) {
+        // 设备有回复 → 确认在线
+        _store.updatePrinter(sn, (p) {
+          p.connectionState = FarmConnectionState.online;
+          p.lastStatusTime = DateTime.now();
+          return p;
+        });
+      }
+    } catch (_) {
+      // 探测失败 → 不立即标离线，由 FarmConnectionMonitor 累积判定
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
