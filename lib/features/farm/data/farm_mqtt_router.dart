@@ -189,7 +189,22 @@ class FarmMqttRouter {
   Future<void> fetchFullState(String sn) async {
     try {
       // ── 1. printer.objects.query → 全量基线状态 ──
-      final fullState = await sendCommand(sn, 'printer.objects.query');
+      final fullState = await sendCommand(sn, 'printer.objects.query', {
+        'objects': {
+          'extruder1': null,
+          'extruder2': null,
+          'extruder3': null,
+          'heater_bed': null,
+          'print_stats': null,
+          'virtual_sdcard': null,
+          'toolhead': null,
+          'fan': null,
+          'display_status': null,
+          'purifier': null,
+          'motion_report': null,
+          'gcode_move': null,
+        },
+      });
       if (fullState.success && fullState.data != null) {
         final data = fullState.data!;
         final status = data['status'] as Map<String, dynamic>?;
@@ -251,6 +266,12 @@ class FarmMqttRouter {
           }
           return p;
         });
+      }
+
+      // ── 4. machine.system_info → LAN IP ──
+      final sysInfo = await sendCommand(sn, 'machine.system_info');
+      if (sysInfo.success && sysInfo.data != null) {
+        _extractAndUpdateIp(sn, sysInfo.data!);
       }
     } catch (_) {
       // 拉取失败不影响已有状态

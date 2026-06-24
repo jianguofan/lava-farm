@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
+import '../../data/farm_store.dart';
+import '../../data/printer_info.dart';
 import '../widgets/batch_toolbar.dart';
 import '../widgets/broker_status_indicator.dart';
 import '../widgets/deployment_mode_banner.dart';
@@ -56,8 +58,42 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
         username: 'lava_app',
         password: 'lava-farm-admin',
       );
+
+      // 注册预设设备（触发 _probeAll 轮询获取 IP）
+      final store = ref.read(farmStoreProvider);
+      _registerDemoDevices(store);
     } catch (_) {
       // 自动连接失败 — 用户可手动进入 Broker 设置页配置
+    }
+  }
+
+  void _registerDemoDevices(FarmStore store) {
+    const demoDevices = [
+      ('8110025060100056K296', '切片工程-01', 'slicing'),
+      ('81100260503102537008', '切片工程-02', 'slicing'),
+      ('8110026050310266IC73', '切片工程-03', 'slicing'),
+      ('81100260503003514ZB5', '切片工程-04', 'slicing'),
+      ('8110026050310190EKV9', 'web全栈-01', 'web'),
+      ('8110026050310268AUFG', 'web全栈-02', 'web'),
+      ('8110025060100049IXMZ', '服务端运维-01', 'backend'),
+      ('8110025070800048LD98', '服务端运维-02', 'backend'),
+      ('8110025070800069BU7J', '客户端-01', 'client'),
+      ('811002605310262H7H8', '客户端-02', 'client'),
+      ('8110026050300191X4HB', '测试-01', 'test'),
+    ];
+
+    for (final (sn, name, group) in demoDevices) {
+      if (store.getPrinter(sn) == null) {
+        store.onPrinterRegistered(PrinterInfo(
+          sn: sn,
+          displayName: name,
+          ip: '—',
+          port: 7125,
+          group: group,
+          source: Source.mqtt,
+          model: 'Snapmaker J1',
+        ));
+      }
     }
   }
 

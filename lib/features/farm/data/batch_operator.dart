@@ -26,6 +26,31 @@ enum BatchOperation {
   gcode,
   setNozzleTemp,
   setBedTemp,
+  startLocalPrint,
+}
+
+/// server.files.start_local_print 参数
+class StartLocalPrintOptions {
+  final String type;     // "gcode" | "zip" | "3mf"
+  final String path;     // 相对于 gcodes 根目录的文件路径
+  final int printPlate; // 3MF 多盘打印的盘号（默认 1）
+  final Map<String, dynamic>? options;
+
+  const StartLocalPrintOptions({
+    required this.type,
+    required this.path,
+    this.printPlate = 1,
+    this.options,
+  });
+
+  Map<String, dynamic> toParams() {
+    return {
+      'type': type,
+      'path': path,
+      'print_plate': printPlate,
+      if (options != null) 'options': options,
+    };
+  }
 }
 
 /// 批量操作器
@@ -98,6 +123,20 @@ class BatchOperator {
       maxConcurrency: highPriorityConcurrency,
     );
   }
+
+  /// 批量启动本地文件打印（server.files.start_local_print）
+  ///
+  /// 支持 gcode / zip / 3mf 文件格式，含多盘选择、耗材映射等选项。
+  Future<List<BatchResult>> batchStartLocalPrint({
+    required List<String> printerSns,
+    required StartLocalPrintOptions printOptions,
+  }) =>
+      _fanOut(
+        printerSns: printerSns,
+        operation: BatchOperation.startLocalPrint,
+        method: 'server.files.start_local_print',
+        params: printOptions.toParams(),
+      );
 
   /// 批量发送 GCode
   Future<List<BatchResult>> batchGcode({

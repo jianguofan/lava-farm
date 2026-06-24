@@ -20,6 +20,7 @@ import '../../data/farm_printer_state.dart';
 import '../../data/printer_discovery.dart';
 import '../../data/printer_info.dart';
 import '../widgets/camera_view.dart';
+import '../widgets/print_section.dart';
 
 /// 打印机详情页
 class PrinterDetailPage extends ConsumerStatefulWidget {
@@ -82,7 +83,16 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
               _RawMessageHistoryCard(printer: printer),
             if (printer.rawMessages.isNotEmpty) const SizedBox(height: 16),
 
-            // ── 区块 2: 温度仪表 ──
+            // ── 区块 2: 上传并打印 ──
+            if (printer.isOnline)
+              PrintSection(
+                sn: printer.sn,
+                ip: printer.ip,
+                port: printer.port,
+              ),
+            if (printer.isOnline) const SizedBox(height: 16),
+
+            // ── 区块 3: 温度仪表 ──
             _TemperatureSection(printer: printer),
             const SizedBox(height: 16),
 

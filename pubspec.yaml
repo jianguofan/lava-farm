@@ -12,6 +12,7 @@ dependencies:
   flutter_secure_storage: ^9.0.0
   mqtt_client: ^10.5.1
   typed_data: ^1.4.0
+  file_selector: ^1.0.0
   # lava_device_sdk:  # 单机 SDK（共享协议层）
   #   path: ../lava_device_sdk
 

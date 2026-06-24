@@ -90,9 +90,7 @@ class CommandResult {
 
   @override
   String toString() =>
-      'CommandResult($sn $method ${success ? "ok" : "FAIL"}${
-        error != null ? " $error" : ""
-      })';
+      'CommandResult($sn $method ${success ? "ok" : "FAIL"}${error != null ? " $error" : ""})';
 }
 
 /// 批次句柄 — 群控操作的返回类型
