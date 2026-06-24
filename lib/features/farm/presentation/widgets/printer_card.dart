@@ -167,7 +167,7 @@ class _SourceBadge extends StatelessWidget {
   }
 }
 
-/// 温度行
+/// 温度行（多挤出机 + 热床）
 class _TemperatureRow extends StatelessWidget {
   final FarmPrinterState printer;
 
@@ -175,31 +175,41 @@ class _TemperatureRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final nozzleTemp = printer.nozzleTemp;
-    final nozzleTarget = printer.nozzleTarget;
+    final extruders = printer.extruders;
     final bedTemp = printer.bedTemp;
     final bedTarget = printer.bedTarget;
 
-    return Row(
-      children: [
-        // 喷嘴温度
-        _TempDisplay(
-          icon: Icons.whatshot,
-          current: nozzleTemp?.value,
-          target: nozzleTarget?.value,
-          isStale: nozzleTemp?.isStale ?? false,
-          unit: '°C',
-        ),
-        const SizedBox(width: 10),
-        // 热床温度
-        _TempDisplay(
-          icon: Icons.heat_pump,
-          current: bedTemp?.value,
-          target: bedTarget?.value,
-          isStale: bedTemp?.isStale ?? false,
-          unit: '°C',
-        ),
-      ],
+    // 收集所有有数据的挤出机
+    final activeExtruders = extruders.where((e) => e.temperature != null).toList();
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          // 挤出机温度（紧凑格式：E1 210° E2 25°）
+          if (activeExtruders.isNotEmpty)
+            ...activeExtruders.map((ext) => Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: _TempDisplay(
+                icon: Icons.whatshot,
+                current: ext.currentTemp,
+                target: ext.targetTemp,
+                isStale: ext.isStale,
+                unit: extruders.length == 1 ? '°C' : '°',
+                label: extruders.length == 1 ? null : 'E${ext.index}',
+              ),
+            )),
+          // 热床温度
+          if (bedTemp != null)
+            _TempDisplay(
+              icon: Icons.heat_pump,
+              current: bedTemp.value,
+              target: bedTarget?.value,
+              isStale: bedTemp.isStale,
+              unit: '°C',
+            ),
+        ],
+      ),
     );
   }
 }
@@ -211,6 +221,7 @@ class _TempDisplay extends StatelessWidget {
   final double? target;
   final bool isStale;
   final String unit;
+  final String? label;
 
   const _TempDisplay({
     required this.icon,
@@ -218,6 +229,7 @@ class _TempDisplay extends StatelessWidget {
     this.target,
     this.isStale = false,
     required this.unit,
+    this.label,
   });
 
   @override
@@ -243,6 +255,10 @@ class _TempDisplay extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (label != null) ...[
+          Text(label!, style: TextStyle(fontSize: 9, color: Colors.grey.shade500, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 2),
+        ],
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 2),
         Text(

@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/discovery_provider.dart';
 import '../widgets/discovery_result_list.dart';
 
@@ -337,38 +338,53 @@ class _DiscoveryWizardPageState extends ConsumerState<DiscoveryWizardPage> {
 
   /// 开始入网流程
   Future<void> _startOnboarding(String accessCode) async {
-    setState(() => _isOnboarding = true);
+    final selectedPrinters = ref.read(selectedPrintersProvider);
+    if (selectedPrinters.isEmpty) return;
 
-    try {
-      // TODO: 调用 FarmHub.onboard() 逐台入网
-      // final hub = ref.read(farmHubProvider);
-      // final selectedPrinters = ref.read(selectedPrintersProvider);
-      //
-      // for (final printer in selectedPrinters) {
-      //   final result = await hub.onboard(
-      //     ip: printer.ip,
-      //     port: printer.port,
-      //     accessCode: accessCode,
-      //     brokerConfig: brokerConfig,
-      //     apiKey: accessCode, // Moonraker 默认 API Key = Access Code
-      //   );
-      //
-      //   if (!result.success) {
-      //     // 记录失败，继续处理下一台
-      //   }
-      // }
-
-      // 模拟入网延迟（实际由 FarmHub 处理）
-      await Future.delayed(const Duration(seconds: 2));
-
+    final hub = ref.read(farmHubProvider);
+    final brokerConfig = ref.read(brokerConnMgrProvider).currentConfig;
+    if (brokerConfig == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('入网完成'),
-            backgroundColor: Colors.green,
+            content: Text('Broker 尚未连接，请先完成 Broker 设置'),
+            backgroundColor: Colors.red,
           ),
         );
-        Navigator.pop(context);
+      }
+      return;
+    }
+
+    setState(() => _isOnboarding = true);
+
+    int successCount = 0;
+    int failCount = 0;
+
+    try {
+      for (final printer in selectedPrinters) {
+        final result = await hub.onboard(
+          ip: printer.ip,
+          port: printer.port,
+          accessCode: accessCode,
+          brokerConfig: brokerConfig,
+        );
+
+        if (result.success) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('入网完成: $successCount 台成功'
+                '${failCount > 0 ? ", $failCount 台失败" : ""}'),
+            backgroundColor: failCount > 0 ? Colors.orange : Colors.green,
+          ),
+        );
+        if (successCount > 0) Navigator.pop(context);
       }
     } catch (e) {
       if (mounted) {

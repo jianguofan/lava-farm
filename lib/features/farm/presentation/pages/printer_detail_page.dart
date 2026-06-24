@@ -1,31 +1,51 @@
-/// 单打印机详情页 (T11.4)
+/// 单打印机详情页
 ///
 /// 显示内容:
-/// - 摄像头实时画面（CameraView 轮询）
+/// - 设备元数据卡片（SN / IP / 型号 / 固件 / Moonraker 信息）
 /// - 实时温度仪表
+/// - 摄像头实时画面（CameraView 轮询）
 /// - 打印进度条 + 预估剩余时间
-/// - 快照历史时间线
-/// - 手动控制面板（归零 / 移动轴 / 设置温度 / 发送 GCode）
+/// - 事件时间线（连接 / 状态变更 / 错误）
+/// - 手动控制面板（归零 / 设置温度 / 发送 GCode）
+
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../data/farm_printer_state.dart';
+import '../../data/printer_discovery.dart';
 import '../../data/printer_info.dart';
 import '../widgets/camera_view.dart';
 
 /// 打印机详情页
-class PrinterDetailPage extends ConsumerWidget {
+class PrinterDetailPage extends ConsumerStatefulWidget {
   final String sn;
 
   const PrinterDetailPage({super.key, required this.sn});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PrinterDetailPage> createState() => _PrinterDetailPageState();
+}
+
+class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
+  @override
+  void initState() {
+    super.initState();
+    // 进入详情 → 按需拉取全量状态
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final router = ref.read(farmMqttRouterProvider);
+      router?.fetchFullState(widget.sn);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final printer = ref.watch(
-      printerRegistryProvider.select((state) => state[sn]),
+      printerRegistryProvider.select((state) => state[widget.sn]),
     );
 
     if (printer == null) {
@@ -39,7 +59,6 @@ class PrinterDetailPage extends ConsumerWidget {
       appBar: AppBar(
         title: Text(printer.displayName ?? printer.sn),
         actions: [
-          // 连接状态指示
           _ConnectionChip(printer: printer),
           const SizedBox(width: 8),
         ],
@@ -49,35 +68,45 @@ class PrinterDetailPage extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── 区块 1: 基本信息 ──
-            _InfoSection(printer: printer),
-            const SizedBox(height: 20),
+            // ── 区块 1: 设备元数据 ──
+            _MetadataCard(printer: printer),
+            const SizedBox(height: 16),
+
+            // ── 区块 1.5: 完整状态快照（rawStateSnapshot） ──
+            if (printer.rawStateSnapshot != null)
+              _RawStateSnapshotCard(printer: printer),
+            if (printer.rawStateSnapshot != null) const SizedBox(height: 16),
+
+            // ── 区块 1.6: 原始消息历史 ──
+            if (printer.rawMessages.isNotEmpty)
+              _RawMessageHistoryCard(printer: printer),
+            if (printer.rawMessages.isNotEmpty) const SizedBox(height: 16),
 
             // ── 区块 2: 温度仪表 ──
             _TemperatureSection(printer: printer),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
 
-            // ── 区块 2.5: 摄像头实时画面 ──
+            // ── 区块 3: 摄像头实时画面 ──
             if (printer.isOnline)
               _CameraSection(
                 sn: printer.sn,
                 ip: printer.ip,
                 port: printer.port,
               ),
-            if (printer.isOnline) const SizedBox(height: 20),
+            if (printer.isOnline) const SizedBox(height: 16),
 
-            // ── 区块 3: 打印进度 ──
+            // ── 区块 4: 打印进度 ──
             if (printer.isPrinting) ...[
               _PrintProgressSection(printer: printer),
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
             ],
 
-            // ── 区块 4: 手动控制 ──
-            _ManualControlSection(sn: sn),
-            const SizedBox(height: 20),
+            // ── 区块 5: 事件时间线 ──
+            _EventTimeline(printer: printer),
+            const SizedBox(height: 16),
 
-            // ── 区块 5: 快照历史 ──
-            _SnapshotTimeline(printer: printer),
+            // ── 区块 6: 手动控制 ──
+            _ManualControlSection(sn: widget.sn),
           ],
         ),
       ),
@@ -85,7 +114,10 @@ class PrinterDetailPage extends ConsumerWidget {
   }
 }
 
-/// 连接状态 Chip
+// ═══════════════════════════════════════════════════════════════
+// 连接状态 Chip
+// ═══════════════════════════════════════════════════════════════
+
 class _ConnectionChip extends StatelessWidget {
   final FarmPrinterState printer;
   const _ConnectionChip({required this.printer});
@@ -110,42 +142,135 @@ class _ConnectionChip extends StatelessWidget {
   }
 }
 
-/// 基本信息区块
-class _InfoSection extends StatelessWidget {
+// ═══════════════════════════════════════════════════════════════
+// 设备元数据卡片
+// ═══════════════════════════════════════════════════════════════
+
+class _MetadataCard extends StatelessWidget {
   final FarmPrinterState printer;
-  const _InfoSection({required this.printer});
+  const _MetadataCard({required this.printer});
 
   @override
   Widget build(BuildContext context) {
+    final lastStatus = printer.lastStatusTime;
+    final serverInfoAge = printer.serverInfoFetchedAt != null
+        ? DateTime.now().difference(printer.serverInfoFetchedAt!)
+        : null;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('设备信息', style: TextStyle(fontWeight: FontWeight.bold)),
+            Row(
+              children: [
+                const Icon(Icons.info_outline, size: 16, color: Color(0xFF0C63E2)),
+                const SizedBox(width: 6),
+                const Text('设备元数据',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                Text(
+                  '${printer.source.label} · ${printer.connectionState.label}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: printer.isOnline ? Colors.green : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
             const Divider(),
-            _InfoRow('序列号', printer.sn),
-            _InfoRow('IP 地址', '${printer.ip}:${printer.port}'),
-            _InfoRow('型号', printer.model ?? '未知'),
-            _InfoRow('固件', printer.firmwareVersion ?? '未知'),
-            _InfoRow('分组', printer.group ?? '未分组'),
-            _InfoRow('通信方式', printer.source.label),
-            _InfoRow('状态', printer.connectionState.label),
+
+            // ── 基本信息 ──
+            _MetaRow('序列号', printer.sn),
+            _MetaRow('主机名', printer.hostname ?? '—'),
+            _MetaRow('IP 地址', '${printer.ip}:${printer.port}'),
+            _MetaRow('分组', printer.group ?? '未分组'),
+
+            // ── 设备信息 ──
+            if (printer.model != null || printer.firmwareVersion != null) ...[
+              const SizedBox(height: 6),
+              if (printer.model != null) _MetaRow('型号', printer.model!),
+              if (printer.firmwareVersion != null)
+                _MetaRow('固件', printer.firmwareVersion!),
+            ],
+            if (printer.softwareVersion != null)
+              _MetaRow('软件版本', printer.softwareVersion!),
+
+            // ── Moonraker 信息 ──
+            if (printer.moonrakerVersion != null ||
+                printer.apiVersionString != null ||
+                printer.klippyState != null) ...[
+              const SizedBox(height: 6),
+              if (printer.moonrakerVersion != null)
+                _MetaRow('Moonraker', printer.moonrakerVersion!),
+              if (printer.apiVersionString != null)
+                _MetaRow('API 版本', printer.apiVersionString!),
+              if (printer.klippyState != null)
+                _MetaRow('Klippy', printer.klippyState!),
+            ],
+            if (printer.cpuInfo != null) _MetaRow('CPU', printer.cpuInfo!),
+
+            // ── 状态时间 ──
+            const SizedBox(height: 6),
+            _MetaRow('最后状态', _formatDateTime(lastStatus)),
+            if (serverInfoAge != null)
+              _MetaRow('设备信息', '${serverInfoAge.inSeconds}s 前获取'),
           ],
         ),
       ),
     );
   }
+
+  String _formatDateTime(DateTime dt) {
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}:'
+        '${dt.second.toString().padLeft(2, '0')}';
+  }
 }
 
-/// 温度仪表区块
+class _MetaRow extends StatelessWidget {
+  final String label;
+  final String value;
+  const _MetaRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 72,
+            child: Text(label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF999999))),
+          ),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w500,
+                    fontFamily: 'monospace')),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 温度仪表
+// ═══════════════════════════════════════════════════════════════
+
 class _TemperatureSection extends StatelessWidget {
   final FarmPrinterState printer;
   const _TemperatureSection({required this.printer});
 
   @override
   Widget build(BuildContext context) {
+    final extruders = printer.extruders;
+    final hasBed = printer.bedTemp != null;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -154,33 +279,48 @@ class _TemperatureSection extends StatelessWidget {
           children: [
             const Text('温度', style: TextStyle(fontWeight: FontWeight.bold)),
             const Divider(),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _TemperatureGauge(
-                  label: '喷嘴',
-                  current: printer.nozzleTemp?.value ?? 0,
-                  target: printer.nozzleTarget?.value,
-                  isStale: printer.nozzleTemp?.isStale ?? false,
-                  color: Colors.red,
+
+            // 挤出机
+            if (extruders.isNotEmpty) ...[
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: extruders.map((ext) => Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: _TemperatureGauge(
+                      label: extruders.length == 1 ? '喷嘴' : 'E${ext.index}',
+                      current: ext.currentTemp,
+                      target: ext.targetTemp,
+                      isStale: ext.isStale,
+                      color: _extruderColor(ext.index),
+                    ),
+                  )).toList(),
                 ),
-                _TemperatureGauge(
-                  label: '热床',
-                  current: printer.bedTemp?.value ?? 0,
-                  target: printer.bedTarget?.value,
-                  isStale: printer.bedTemp?.isStale ?? false,
-                  color: Colors.orange,
-                ),
-              ],
-            ),
+              ),
+              if (hasBed) const SizedBox(height: 12),
+            ],
+
+            // 热床
+            if (hasBed)
+              _TemperatureGauge(
+                label: '热床',
+                current: printer.bedTemp?.value ?? 0,
+                target: printer.bedTarget?.value,
+                isStale: printer.bedTemp?.isStale ?? false,
+                color: Colors.orange,
+              ),
           ],
         ),
       ),
     );
   }
+
+  Color _extruderColor(int index) {
+    const colors = [Colors.red, Colors.blue, Colors.green, Colors.purple, Colors.teal];
+    return colors[(index - 1) % colors.length];
+  }
 }
 
-/// 温度仪表盘（简化为数字显示 + 进度环）
 class _TemperatureGauge extends StatelessWidget {
   final String label;
   final double current;
@@ -251,7 +391,10 @@ class _TemperatureGauge extends StatelessWidget {
   }
 }
 
-/// 打印进度区块
+// ═══════════════════════════════════════════════════════════════
+// 打印进度
+// ═══════════════════════════════════════════════════════════════
+
 class _PrintProgressSection extends StatelessWidget {
   final FarmPrinterState printer;
   const _PrintProgressSection({required this.printer});
@@ -290,12 +433,12 @@ class _PrintProgressSection extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            _InfoRow('文件', file),
-            if (layers != null) _InfoRow('层数', layers),
+            _MetaRow('文件', file),
+            if (layers != null) _MetaRow('层数', layers),
             if (eta != null)
-              _InfoRow('预估剩余', '${eta.toStringAsFixed(0)} 秒'),
+              _MetaRow('预估剩余', '${eta.toStringAsFixed(0)} 秒'),
             if (printer.totalDuration != null)
-              _InfoRow('已用时间', '${(printer.totalDuration! / 60).toStringAsFixed(1)} 分钟'),
+              _MetaRow('已用时间', '${(printer.totalDuration! / 60).toStringAsFixed(1)} 分钟'),
           ],
         ),
       ),
@@ -303,7 +446,10 @@ class _PrintProgressSection extends StatelessWidget {
   }
 }
 
-/// 手动控制面板
+// ═══════════════════════════════════════════════════════════════
+// 手动控制
+// ═══════════════════════════════════════════════════════════════
+
 class _ManualControlSection extends StatefulWidget {
   final String sn;
   const _ManualControlSection({required this.sn});
@@ -316,9 +462,11 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
   final _gcodeController = TextEditingController();
   final _tempController = TextEditingController(text: '210');
   bool _isSending = false;
+  bool _disposed = false;
 
   @override
   void dispose() {
+    _disposed = true;
     _gcodeController.dispose();
     _tempController.dispose();
     super.dispose();
@@ -340,7 +488,7 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
               width: double.infinity,
               child: OutlinedButton.icon(
                 onPressed: _isSending ? null : () {
-                  // TODO: 调用 BatchOperator.batchEmergencyStop
+                  // TODO: 调用 batchEmergencyStop
                 },
                 icon: const Icon(Icons.warning_amber, color: Colors.red),
                 label: const Text('紧急停止', style: TextStyle(color: Colors.red)),
@@ -368,17 +516,13 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
-                  onPressed: _isSending ? null : () {
-                    // TODO: 调用 batchSetNozzleTemp
-                  },
+                  onPressed: _isSending ? null : () {},
                   icon: const Icon(Icons.whatshot, size: 18),
                   label: const Text('设置喷嘴'),
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
-                  onPressed: _isSending ? null : () {
-                    // TODO: 调用 batchSetBedTemp
-                  },
+                  onPressed: _isSending ? null : () {},
                   icon: const Icon(Icons.heat_pump, size: 18),
                   label: const Text('设置热床'),
                 ),
@@ -412,9 +556,8 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
                       ? null
                       : () {
                           setState(() => _isSending = true);
-                          // TODO: 调用 batchGcode
                           Future.delayed(const Duration(seconds: 1), () {
-                            if (mounted) setState(() => _isSending = false);
+                            if (!_disposed && mounted) setState(() => _isSending = false);
                           });
                         },
                   icon: _isSending
@@ -432,7 +575,6 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
   }
 }
 
-/// GCode 快捷芯片按钮
 class _GcodeChip extends StatelessWidget {
   final String gcode;
   final String label;
@@ -442,18 +584,19 @@ class _GcodeChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return ActionChip(
       label: Text(label, style: const TextStyle(fontSize: 11)),
-      onPressed: () {
-        // TODO: 调用 batchGcode
-      },
+      onPressed: () {},
       visualDensity: VisualDensity.compact,
     );
   }
 }
 
-/// 快照历史时间线
-class _SnapshotTimeline extends StatelessWidget {
+// ═══════════════════════════════════════════════════════════════
+// 事件时间线
+// ═══════════════════════════════════════════════════════════════
+
+class _EventTimeline extends StatelessWidget {
   final FarmPrinterState printer;
-  const _SnapshotTimeline({required this.printer});
+  const _EventTimeline({required this.printer});
 
   @override
   Widget build(BuildContext context) {
@@ -466,13 +609,12 @@ class _SnapshotTimeline extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('事件历史', style: TextStyle(fontWeight: FontWeight.bold)),
-                Text(
-                  '最近 ${snapshots.length} 条',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                ),
+                const Text('事件时间线',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                Text('${snapshots.length} 条',
+                    style: const TextStyle(fontSize: 11, color: Color(0xFF999999))),
               ],
             ),
             const Divider(),
@@ -484,48 +626,96 @@ class _SnapshotTimeline extends StatelessWidget {
                 ),
               )
             else
-              ...snapshots.reversed.take(10).map((snapshot) => ListTile(
-                    dense: true,
-                    leading: _snapshotIcon(snapshot.reason),
-                    title: Text(
-                      snapshot.reason,
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                    subtitle: Text(
-                      _formatTime(snapshot.timestamp),
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                    trailing: snapshot.context != null
-                        ? Text(
-                            snapshot.context!,
-                            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                          )
-                        : null,
-                  )),
+              SizedBox(
+                height: 300,
+                child: ListView.separated(
+                  itemCount: snapshots.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    // 倒序：最新事件在前
+                    final snapshot = snapshots[snapshots.length - 1 - i];
+                    return _EventRow(snapshot: snapshot);
+                  },
+                ),
+              ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _snapshotIcon(String reason) {
-    if (reason.contains('offline')) return const Icon(Icons.wifi_off, size: 18, color: Colors.red);
-    if (reason.contains('failed')) return const Icon(Icons.error, size: 18, color: Colors.red);
-    if (reason.contains('batch')) return const Icon(Icons.sync, size: 18, color: Colors.orange);
-    return const Icon(Icons.circle, size: 18, color: Colors.grey);
+class _EventRow extends StatelessWidget {
+  final FarmSnapshot snapshot;
+  const _EventRow({required this.snapshot});
+
+  Color get _color {
+    final reason = snapshot.reason;
+    if (reason.contains('离线') || reason.contains('offline') || reason.contains('失败')) {
+      return const Color(0xFFF40004);
+    }
+    if (reason.contains('上线') || reason.contains('online') || reason.contains('发现')) {
+      return const Color(0xFF00D4AA);
+    }
+    if (reason.contains('状态变更') || reason.contains('打印')) {
+      return const Color(0xFF0C63E2);
+    }
+    if (reason.contains('信息更新') || reason.contains('batch')) {
+      return const Color(0xFFFF9900);
+    }
+    return const Color(0xFF999999);
   }
 
-  String _formatTime(DateTime dt) {
-    return '${dt.hour.toString().padLeft(2, '0')}:'
-        '${dt.minute.toString().padLeft(2, '0')}:'
-        '${dt.second.toString().padLeft(2, '0')}';
+  @override
+  Widget build(BuildContext context) {
+    final ts = '${snapshot.timestamp.hour.toString().padLeft(2, '0')}:'
+        '${snapshot.timestamp.minute.toString().padLeft(2, '0')}:'
+        '${snapshot.timestamp.second.toString().padLeft(2, '0')}';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            margin: const EdgeInsets.only(top: 5),
+            decoration: BoxDecoration(shape: BoxShape.circle, color: _color),
+          ),
+          const SizedBox(width: 8),
+          Text(ts,
+              style: const TextStyle(
+                  fontSize: 11, color: Color(0xFF999999), fontFamily: 'monospace')),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: _color.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(snapshot.reason,
+                style: TextStyle(fontSize: 10, color: _color)),
+          ),
+          if (snapshot.context != null) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(snapshot.context!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10, color: Color(0xFF666666))),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 
-/// 摄像头实时画面区块
-///
-/// 发送 camera.start_monitor 命令给打印机，获取帧 URL，
-/// 然后通过 CameraView 轮询显示实时画面。
+// ═══════════════════════════════════════════════════════════════
+// 摄像头区块
+// ═══════════════════════════════════════════════════════════════
+
 class _CameraSection extends ConsumerStatefulWidget {
   final String sn;
   final String ip;
@@ -545,13 +735,13 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
   bool _isActive = false;
   String? _frameUrl;
   bool _isStarting = false;
+  bool _isResolving = false;
   String? _error;
 
   /// 可用作摄像头 HTTP 请求的真实 IP（覆盖占位符如 'MQTT'）
   late String _effectiveIp;
   late final TextEditingController _ipController;
 
-  /// 检查 IP 是否为有效 IPv4 地址
   bool get _ipIsValid {
     final ip = _effectiveIp.trim();
     return RegExp(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(ip);
@@ -567,7 +757,18 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
   @override
   void dispose() {
     _ipController.dispose();
-    _stopCamera();
+    if (_isActive) {
+      _isActive = false;
+      _frameUrl = null;
+      final cameraService = ref.read(cameraServiceProvider);
+      if (cameraService != null) {
+        cameraService.stopMonitor(
+          sn: widget.sn,
+          ip: _effectiveIp.trim(),
+          port: widget.port,
+        );
+      }
+    }
     super.dispose();
   }
 
@@ -634,6 +835,46 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     }
   }
 
+  /// 解析打印机真实 LAN IP
+  ///
+  /// MQTT machine.system_info 优先（设备在线即可秒回）；
+  /// 降级到子网扫描 + /server/info SN 匹配。
+  Future<void> _resolveIp() async {
+    setState(() => _isResolving = true);
+
+    try {
+      String? ip;
+
+      // 1) MQTT 优先 — 直接问设备要网络信息
+      final cameraService = ref.read(cameraServiceProvider);
+      if (cameraService != null) {
+        ip = await cameraService.resolveDeviceIp(widget.sn);
+      }
+
+      // 2) 降级：子网扫描
+      if (ip == null) {
+        ip = await PrinterDiscovery.resolveIpBySn(widget.sn);
+      }
+
+      if (!mounted) return;
+
+      if (ip != null) {
+        final resolved = ip;
+        setState(() {
+          _effectiveIp = resolved;
+          _ipController.text = resolved;
+          _isResolving = false;
+        });
+        ref.read(printerRegistryProvider.notifier)
+            .updatePrinter(widget.sn, (p) { p.ip = resolved; return p; });
+      } else {
+        setState(() => _isResolving = false);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isResolving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -642,7 +883,6 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 标题行 + 开关按钮
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -661,8 +901,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                             ? const SizedBox(
                                 width: 16,
                                 height: 16,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2),
+                                child: CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Icon(Icons.videocam, size: 18),
                         label: Text(_isStarting ? '开启中...' : '开启实时摄像头'),
@@ -671,7 +910,6 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
             ),
             const SizedBox(height: 8),
 
-            // IP 输入（当设备记录的 IP 不是有效地址时显示）
             if (!_ipIsValid)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
@@ -698,11 +936,32 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                         onChanged: (v) => setState(() => _effectiveIp = v),
                       ),
                     ),
+                    const SizedBox(width: 6),
+                    SizedBox(
+                      height: 32,
+                      child: _isResolving
+                          ? const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 12),
+                              child: SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : TextButton.icon(
+                              onPressed: _resolveIp,
+                              icon: const Icon(Icons.wifi_find, size: 16),
+                              label: const Text('扫描', style: TextStyle(fontSize: 12)),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                            ),
+                    ),
                   ],
                 ),
               ),
 
-            // 错误信息
             if (_error != null)
               Container(
                 width: double.infinity,
@@ -713,14 +972,12 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.error_outline,
-                        size: 18, color: Colors.red.shade700),
+                    Icon(Icons.error_outline, size: 18, color: Colors.red.shade700),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         _error!,
-                        style: TextStyle(
-                            color: Colors.red.shade700, fontSize: 13),
+                        style: TextStyle(color: Colors.red.shade700, fontSize: 13),
                       ),
                     ),
                     TextButton(
@@ -731,14 +988,12 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                 ),
               ),
 
-            // 摄像头画面
             if (_isActive && _frameUrl != null)
               CameraView(
                 frameUrl: _frameUrl!,
                 isActive: _isActive,
               ),
 
-            // 未激活时的占位提示
             if (!_isActive && _error == null)
               Container(
                 width: double.infinity,
@@ -754,8 +1009,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                     const SizedBox(height: 8),
                     Text(
                       '点击上方按钮开启摄像头实时画面',
-                      style: TextStyle(
-                          color: Colors.grey.shade500, fontSize: 13),
+                      style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
                     ),
                   ],
                 ),
@@ -767,21 +1021,460 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
   }
 }
 
-/// 信息行
-class _InfoRow extends StatelessWidget {
-  final String label;
-  final String value;
-  const _InfoRow(this.label, this.value);
+// ═══════════════════════════════════════════════════════════════
+// 完整状态快照卡片
+// ═══════════════════════════════════════════════════════════════
+
+/// 展示 rawStateSnapshot 中的所有字段
+///
+/// 分两组：
+/// - 已在 updateTelemetry 中提取的字段（绿色标记）
+/// - 未提取的额外字段（橙色标记），用于调试发现新数据源
+class _RawStateSnapshotCard extends StatefulWidget {
+  final FarmPrinterState printer;
+  const _RawStateSnapshotCard({required this.printer});
+
+  @override
+  State<_RawStateSnapshotCard> createState() => _RawStateSnapshotCardState();
+}
+
+class _RawStateSnapshotCardState extends State<_RawStateSnapshotCard> {
+  bool _expanded = false;
+
+  /// updateTelemetry 中已提取的键前缀集合
+  static const _extractedPrefixes = {
+    'extruder.temperature', 'extruder.target',
+    'heater_bed.temperature', 'heater_bed.target',
+    'print_stats.state', 'print_stats.filename',
+    'print_stats.total_duration', 'print_stats.filament_used',
+    'print_stats.info.layer_num', 'print_stats.info.total_layer',
+    'virtual_sdcard.progress',
+  };
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    final snapshot = widget.printer.rawStateSnapshot;
+    if (snapshot == null || snapshot.isEmpty) return const SizedBox.shrink();
+
+    final keys = snapshot.keys.toList()..sort();
+
+    final extracted = <String>[];
+    final extra = <String>[];
+    for (final k in keys) {
+      if (_extractedPrefixes.any((p) => k.startsWith(p))) {
+        extracted.add(k);
+      } else {
+        extra.add(k);
+      }
+    }
+
+    final age = widget.printer.rawStateSnapshotTime != null
+        ? DateTime.now().difference(widget.printer.rawStateSnapshotTime!)
+        : null;
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
-          Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.storage, size: 16, color: Color(0xFF0C63E2)),
+                  const SizedBox(width: 6),
+                  const Text('完整状态快照',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${keys.length} 字段',
+                      style: TextStyle(fontSize: 10, color: Colors.blue.shade700),
+                    ),
+                  ),
+                  if (extra.isNotEmpty) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '+${extra.length} 未提取',
+                        style: TextStyle(fontSize: 10, color: Colors.orange.shade700),
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  if (age != null)
+                    Text(
+                      '${age.inSeconds}s 前',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                    ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 20,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (extracted.isNotEmpty) ...[
+                    Text('已提取字段',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.green.shade700)),
+                    const SizedBox(height: 4),
+                    ...extracted.map((k) => _SnapshotFieldRow(
+                          keyName: k,
+                          value: snapshot[k],
+                          isExtracted: true,
+                        )),
+                    const SizedBox(height: 8),
+                  ],
+                  if (extra.isNotEmpty) ...[
+                    Text('额外字段（未在 updateTelemetry 中提取）',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.orange.shade700)),
+                    const SizedBox(height: 4),
+                    ...extra.map((k) => _SnapshotFieldRow(
+                          keyName: k,
+                          value: snapshot[k],
+                          isExtracted: false,
+                        )),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 快照字段行
+class _SnapshotFieldRow extends StatelessWidget {
+  final String keyName;
+  final dynamic value;
+  final bool isExtracted;
+
+  const _SnapshotFieldRow({
+    required this.keyName,
+    required this.value,
+    required this.isExtracted,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final displayValue = value is Map || value is List
+        ? const JsonEncoder.withIndent('  ').convert(value)
+        : value.toString();
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            margin: const EdgeInsets.only(top: 5, right: 6),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isExtracted ? Colors.green.shade400 : Colors.orange.shade300,
+            ),
+          ),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: keyName,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: isExtracted ? Colors.green.shade800 : Colors.grey.shade700,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  TextSpan(
+                    text: '  →  ',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+                  ),
+                  TextSpan(
+                    text: displayValue.length > 80
+                        ? '${displayValue.substring(0, 80)}…'
+                        : displayValue,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                ],
+              ),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 原始消息历史卡片
+// ═══════════════════════════════════════════════════════════════
+
+/// 展示 rawMessages 环形缓冲中的历史消息
+///
+/// 每条消息显示时间戳 + 方法名 + 可展开的 JSON 内容
+class _RawMessageHistoryCard extends StatefulWidget {
+  final FarmPrinterState printer;
+  const _RawMessageHistoryCard({required this.printer});
+
+  @override
+  State<_RawMessageHistoryCard> createState() => _RawMessageHistoryCardState();
+}
+
+class _RawMessageHistoryCardState extends State<_RawMessageHistoryCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final messages = widget.printer.rawMessages;
+    if (messages.isEmpty) return const SizedBox.shrink();
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.history, size: 16, color: Color(0xFF0C63E2)),
+                  const SizedBox(width: 6),
+                  const Text('原始消息历史',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.purple.shade50,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${messages.length} 条',
+                      style: TextStyle(fontSize: 10, color: Colors.purple.shade700),
+                    ),
+                  ),
+                  const Spacer(),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 20,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded) ...[
+            const Divider(height: 1),
+            SizedBox(
+              height: 300,
+              child: ListView.builder(
+                padding: const EdgeInsets.all(8),
+                itemCount: messages.length,
+                itemBuilder: (_, index) {
+                  final msg = messages[messages.length - 1 - index];
+                  return _RawMessageTile(
+                    message: msg,
+                    index: messages.length - index,
+                  );
+                },
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 单条原始消息
+class _RawMessageTile extends StatefulWidget {
+  final Map<String, dynamic> message;
+  final int index;
+
+  const _RawMessageTile({required this.message, required this.index});
+
+  @override
+  State<_RawMessageTile> createState() => _RawMessageTileState();
+}
+
+class _RawMessageTileState extends State<_RawMessageTile> {
+  bool _jsonExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final method = widget.message['method'] as String? ?? '?';
+    final params = widget.message['params'];
+
+    DateTime? msgTime;
+    if (params is List && params.length >= 2 && params[1] is num) {
+      msgTime = DateTime.fromMillisecondsSinceEpoch(
+        ((params[1] as num) * 1000).toInt(),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _jsonExpanded = !_jsonExpanded),
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                children: [
+                  Container(
+                    width: 22,
+                    height: 18,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade100,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(
+                      '#${widget.index}',
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue.shade700),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      method,
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (msgTime != null)
+                    Text(
+                      '${msgTime.hour.toString().padLeft(2, '0')}:'
+                      '${msgTime.minute.toString().padLeft(2, '0')}:'
+                      '${msgTime.second.toString().padLeft(2, '0')}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                    ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _jsonExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_jsonExpanded)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: const BorderRadius.only(
+                  bottomLeft: Radius.circular(6),
+                  bottomRight: Radius.circular(6),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      GestureDetector(
+                        onTap: () {
+                          final jsonStr =
+                              const JsonEncoder.withIndent('  ').convert(widget.message);
+                          Clipboard.setData(ClipboardData(text: jsonStr));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('已复制完整 JSON'),
+                              duration: Duration(seconds: 1),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.copy, size: 12, color: Colors.white70),
+                              SizedBox(width: 4),
+                              Text('复制',
+                                  style: TextStyle(
+                                      fontSize: 10, color: Colors.white70)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(widget.message),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      color: Color(0xFFD4D4D4),
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );

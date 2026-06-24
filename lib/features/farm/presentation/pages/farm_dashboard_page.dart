@@ -33,9 +33,39 @@ class FarmDashboardPage extends ConsumerStatefulWidget {
 class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
   final _selectedSns = <String>{};
   _PrinterFilter _activeFilter = _PrinterFilter.all;
+  bool _autoConnectAttempted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首帧后自动连接 Broker
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+  }
+
+  Future<void> _autoConnect() async {
+    if (_autoConnectAttempted) return;
+    _autoConnectAttempted = true;
+
+    final manager = ref.read(brokerConnMgrProvider);
+    if (manager.isConnected) return;
+
+    try {
+      await manager.connect(
+        host: '127.0.0.1',
+        port: 1883,
+        username: 'lava_app',
+        password: 'lava-farm-admin',
+      );
+    } catch (_) {
+      // 自动连接失败 — 用户可手动进入 Broker 设置页配置
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    // 保持 MQTT Router Provider 存活 — 确保连接 Broker 后自动 start()
+    ref.watch(farmMqttRouterProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Lava Farm'),

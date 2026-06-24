@@ -34,6 +34,20 @@ class Staleable<T> {
   String toString() => 'Staleable($value, stale: $isStale)';
 }
 
+/// 挤出机状态
+class ExtruderState {
+  final int index; // 1, 2, 3 ...
+  Staleable<double>? temperature;
+  Staleable<double>? target;
+
+  ExtruderState({required this.index, this.temperature, this.target});
+
+  double get currentTemp => temperature?.value ?? 0;
+  double? get targetTemp => target?.value;
+  bool get isStale => temperature?.isStale ?? true;
+  bool get isHeating => targetTemp != null && (currentTemp - targetTemp!).abs() > 1.0;
+}
+
 /// 批量操作结果
 class BatchResult {
   final String printerSn;
@@ -77,15 +91,28 @@ class FarmPrinterState {
   String? model;
   String? firmwareVersion;
 
+  // ── Moonraker server.info / printer.info 元数据 ──
+  String? hostname;         // printer.info.hostname
+  String? softwareVersion;  // printer.info.software_version
+  String? cpuInfo;          // printer.info.cpu_info
+  String? klippyState;      // server.info.klippy_state
+  String? moonrakerVersion; // server.info.moonraker_version
+  String? apiVersionString; // server.info.api_version_string
+  DateTime? serverInfoFetchedAt; // 最近一次成功获取 server.info 的时间
+
   // ── 通信模式 ──
   Source source;
   FarmConnectionState connectionState;
 
   // ── 实时遥测 (Staleable) ──
-  Staleable<double>? nozzleTemp;
-  Staleable<double>? nozzleTarget;
+  /// 多挤出机（extruder1/2/3），index 从 1 开始
+  final List<ExtruderState> extruders = [];
   Staleable<double>? bedTemp;
   Staleable<double>? bedTarget;
+
+  /// 便捷访问：第一个挤出机（保持旧代码兼容）
+  Staleable<double>? get nozzleTemp => extruders.isNotEmpty ? extruders.first.temperature : null;
+  Staleable<double>? get nozzleTarget => extruders.isNotEmpty ? extruders.first.target : null;
   Staleable<String>? printState;     // "standby" | "printing" | "paused" | "complete" | "error"
   Staleable<double>? progress;       // 0.0 ~ 1.0
   Staleable<String>? currentFile;
@@ -109,6 +136,15 @@ class FarmPrinterState {
   static const int maxSnapshots = 50;
   final List<FarmSnapshot> _snapshots = [];
 
+  // ── 原始消息收集 ──
+  /// 原始 MQTT 消息环形缓冲（最近 N 条）
+  static const int maxRawMessages = 200;
+  final List<Map<String, dynamic>> _rawMessages = [];
+
+  /// 最近一次完整状态快照（所有展平键值对，不限于 updateTelemetry 提取的字段）
+  Map<String, dynamic>? rawStateSnapshot;
+  DateTime? rawStateSnapshotTime;
+
   FarmPrinterState({
     required this.sn,
     this.displayName,
@@ -119,8 +155,14 @@ class FarmPrinterState {
     this.connectionState = FarmConnectionState.offline,
     this.model,
     this.firmwareVersion,
-    this.nozzleTemp,
-    this.nozzleTarget,
+    this.hostname,
+    this.softwareVersion,
+    this.cpuInfo,
+    this.klippyState,
+    this.moonrakerVersion,
+    this.apiVersionString,
+    this.serverInfoFetchedAt,
+    List<ExtruderState>? extruders,
     this.bedTemp,
     this.bedTarget,
     this.printState,
@@ -133,7 +175,9 @@ class FarmPrinterState {
     this.filamentUsed,
     this.lastDataTimestamp,
     DateTime? lastStatusTime,
-  }) : lastStatusTime = lastStatusTime ?? DateTime.now();
+  }) : lastStatusTime = lastStatusTime ?? DateTime.now() {
+    if (extruders != null) this.extruders.addAll(extruders);
+  }
 
   // ── 派生属性 ──
 
@@ -146,28 +190,65 @@ class FarmPrinterState {
   /// 快照列表（只读）
   List<FarmSnapshot> get snapshots => List.unmodifiable(_snapshots);
 
+  /// 原始消息列表（只读，最近 maxRawMessages 条）
+  List<Map<String, dynamic>> get rawMessages => List.unmodifiable(_rawMessages);
+
   // ═══════════════════════════════════════════════════════════
   // 状态更新
   // ═══════════════════════════════════════════════════════════
 
-  /// 更新遥测数据（含时间戳保护）
+  /// 更新遥测数据（含时间戳保护 + 值去重）
   ///
   /// [data] 展开后的键值对，键格式如 "extruder.temperature"、"print_stats.state"
   /// [eventTime] 数据产生的时间戳（MQTT eventtime 或 HTTP pollTime）
-  void updateTelemetry(Map<String, dynamic> data, {DateTime? eventTime}) {
+  /// 返回 true 表示有实际数据变更，false 表示全部字段值未变（可跳过通知）
+  bool updateTelemetry(Map<String, dynamic> data, {DateTime? eventTime}) {
     // 时间戳保护：忽略比已有数据更旧的更新
     if (eventTime != null && lastDataTimestamp != null) {
-      if (!eventTime.isAfter(lastDataTimestamp!)) return;
+      if (!eventTime.isAfter(lastDataTimestamp!)) return false;
     }
 
-    // 喷嘴温度
+    // 值去重：如果所有字段值与已有快照相同，跳过
+    if (rawStateSnapshot != null) {
+      bool anyChanged = false;
+      for (final entry in data.entries) {
+        if (rawStateSnapshot![entry.key] != entry.value) {
+          anyChanged = true;
+          break;
+        }
+      }
+      if (!anyChanged) return false;
+    }
+
+    // 多挤出机温度（extruder1 / extruder2 / extruder3 ...）
+    for (int i = 1; i <= 9; i++) {
+      final tempKey = 'extruder$i.temperature';
+      final targetKey = 'extruder$i.target';
+      if (data.containsKey(tempKey) || data.containsKey(targetKey)) {
+        _ensureExtruder(i);
+        final ext = extruders[i - 1];
+        if (data.containsKey(tempKey)) {
+          ext.temperature = ext.temperature?.update(
+                (data[tempKey] as num).toDouble()) ??
+              Staleable((data[tempKey] as num).toDouble());
+        }
+        if (data.containsKey(targetKey)) {
+          ext.target = ext.target?.update(
+                (data[targetKey] as num).toDouble()) ??
+              Staleable((data[targetKey] as num).toDouble());
+        }
+      }
+    }
+    // 兼容旧格式: extruder.temperature（无编号 = extruder1）
     if (data.containsKey('extruder.temperature')) {
-      nozzleTemp = nozzleTemp?.update(
+      _ensureExtruder(1);
+      extruders[0].temperature = extruders[0].temperature?.update(
             (data['extruder.temperature'] as num).toDouble()) ??
           Staleable((data['extruder.temperature'] as num).toDouble());
     }
     if (data.containsKey('extruder.target')) {
-      nozzleTarget = nozzleTarget?.update(
+      _ensureExtruder(1);
+      extruders[0].target = extruders[0].target?.update(
             (data['extruder.target'] as num).toDouble()) ??
           Staleable((data['extruder.target'] as num).toDouble());
     }
@@ -221,6 +302,7 @@ class FarmPrinterState {
       lastDataTimestamp = eventTime;
     }
     lastStatusTime = DateTime.now();
+    return true;
   }
 
   /// 标记来源（MQTT 或 HTTP）
@@ -228,10 +310,19 @@ class FarmPrinterState {
     source = src;
   }
 
+  /// 确保存在第 index 个挤出机（1-based）
+  void _ensureExtruder(int index) {
+    while (extruders.length < index) {
+      extruders.add(ExtruderState(index: extruders.length + 1));
+    }
+  }
+
   /// 标记所有遥测为过期
   void markTelemetryStale() {
-    nozzleTemp = nozzleTemp?.markStale();
-    nozzleTarget = nozzleTarget?.markStale();
+    for (final ext in extruders) {
+      ext.temperature = ext.temperature?.markStale();
+      ext.target = ext.target?.markStale();
+    }
     bedTemp = bedTemp?.markStale();
     bedTarget = bedTarget?.markStale();
     printState = printState?.markStale();
@@ -248,6 +339,47 @@ class FarmPrinterState {
     if (_snapshots.length > maxSnapshots) {
       _snapshots.removeAt(0);
     }
+  }
+
+  /// 添加原始 MQTT 消息到环形缓冲
+  ///
+  /// [message] 解析后的 JSON-RPC 消息 Map（含 jsonrpc/method/params）
+  void addRawMessage(Map<String, dynamic> message) {
+    _rawMessages.add(message);
+    if (_rawMessages.length > maxRawMessages) {
+      _rawMessages.removeAt(0);
+    }
+  }
+
+  /// 更新最近一次完整状态快照（合并模式）
+  ///
+  /// MQTT notify_status_update 只推送变化字段，因此需要合并而非替换。
+  /// printer.objects.query 全量拉取时 snapshot 包含所有字段，后续增量消息逐步合并。
+  ///
+  /// [snapshot] 展平后的键值对（如 "extruder.temperature" → 210.5）
+  void updateRawStateSnapshot(Map<String, dynamic> snapshot) {
+    rawStateSnapshot ??= {};
+    // 合并：新值覆盖旧值，旧值保留
+    rawStateSnapshot!.addAll(snapshot);
+    rawStateSnapshotTime = DateTime.now();
+  }
+
+  /// 更新设备元数据（从 server.info / printer.info 响应）
+  void updateDeviceInfo({
+    String? hostname,
+    String? softwareVersion,
+    String? cpuInfo,
+    String? klippyState,
+    String? moonrakerVersion,
+    String? apiVersionString,
+  }) {
+    if (hostname != null) this.hostname = hostname;
+    if (softwareVersion != null) this.softwareVersion = softwareVersion;
+    if (cpuInfo != null) this.cpuInfo = cpuInfo;
+    if (klippyState != null) this.klippyState = klippyState;
+    if (moonrakerVersion != null) this.moonrakerVersion = moonrakerVersion;
+    if (apiVersionString != null) this.apiVersionString = apiVersionString;
+    serverInfoFetchedAt = DateTime.now();
   }
 
   /// 从 PrinterInfo 创建初始状态

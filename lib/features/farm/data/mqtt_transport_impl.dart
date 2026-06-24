@@ -44,8 +44,8 @@ class MqttTransportImpl implements MqttTransportAdapter {
     client.useWebSocket = false;
     client.secure = false;
 
-    // 日志（调试时打开）   <── 打开！
-    client.logging(on: true);
+    // 日志（调试时临时改为 true）
+    client.logging(on: false);
 
     // Keepalive 60 秒
     client.keepAlivePeriod = 60;
@@ -137,18 +137,19 @@ class MqttTransportImpl implements MqttTransportAdapter {
   // 内部
   // ═══════════════════════════════════════════════════════════
 
-  void _onUpdates(List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>> messages) {
-    print('[MQTT] ← 收到 ${messages.length} 条消息');
-    for (final msg in messages) {
-      print('[MQTT]   topic: ${msg.topic}');
+  int _msgCount = 0;
+  DateTime _lastMsgLog = DateTime.now();
 
+  void _onUpdates(List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>> messages) {
+    _msgCount += messages.length;
+
+    for (final msg in messages) {
       // 提取 payload 字节
       Uint8List payloadBytes;
       if (msg.payload is mqtt.MqttPublishMessage) {
         final pubMsg = msg.payload as mqtt.MqttPublishMessage;
         payloadBytes = Uint8List.fromList(pubMsg.payload.message);
       } else {
-        // 兜底：使用 toString
         payloadBytes = utf8.encode(msg.payload.toString());
       }
 
@@ -156,6 +157,14 @@ class MqttTransportImpl implements MqttTransportAdapter {
         topic: msg.topic,
         payload: payloadBytes,
       ));
+    }
+
+    // 每 5 秒汇总一次，不逐条打印
+    final now = DateTime.now();
+    if (now.difference(_lastMsgLog).inSeconds >= 5) {
+      print('[MQTT] 📊 5s 内收到 $_msgCount 条消息');
+      _msgCount = 0;
+      _lastMsgLog = now;
     }
   }
 

@@ -106,6 +106,38 @@ class CameraService {
     return 'http://$ip:$port/server/files/camera/monitor.jpg';
   }
 
+  /// 通过 MQTT machine.system_info 获取设备真实 LAN IP
+  ///
+  /// 返回 IP 地址，失败返回 null。
+  Future<String?> resolveDeviceIp(String sn) async {
+    try {
+      final result = await _router.sendCommand(sn, 'machine.system_info');
+      if (!result.success || result.data == null) return null;
+
+      final sysInfo = result.data!['system_info'] as Map<String, dynamic>?;
+      final network = sysInfo?['network'] as Map<String, dynamic>?;
+      if (network == null) return null;
+
+      for (final entry in network.entries) {
+        final iface = entry.value as Map<String, dynamic>?;
+        final addresses = iface?['ip_addresses'] as List?;
+        if (addresses == null) continue;
+
+        for (final addr in addresses) {
+          if (addr is Map<String, dynamic> &&
+              addr['family'] == 'ipv4' &&
+              addr['is_link_local'] != true) {
+            final ip = addr['address'] as String?;
+            if (ip != null && ip != '127.0.0.1') return ip;
+          }
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void dispose() {
     _httpClient.close();
     _activeMonitors.clear();

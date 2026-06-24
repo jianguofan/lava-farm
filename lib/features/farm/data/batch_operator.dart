@@ -5,11 +5,15 @@
 ///   - 急停: 40 并发, 5s 超时
 ///
 /// 命令路由:
-///   - MQTT 打印机 → MQTT 发布 + 等待 response
+///   - MQTT 打印机 → FarmCommandGateway.sendToOne() (JSON-RPC 请求-响应)
 ///   - HTTP 打印机 → HTTP POST + probeSingle 即时确认
+///
+/// 群控进度: 通过 UnifiedRequestTracker 的 batchId 索引追踪。
+///   调用方可通过 BatchHandle.progressStream 监听实时进度。
 
 import 'dart:async';
 
+import 'farm_command_gateway.dart';
 import 'farm_printer_state.dart';
 import 'farm_store.dart';
 
@@ -28,15 +32,18 @@ enum BatchOperation {
 class BatchOperator {
   final FarmStore _store;
 
-  /// 命令发送回调（由 FarmMqttRouter 或 HttpPoller 提供）
+  /// MQTT 指令网关（单控 / 群控共用）
+  final FarmCommandGateway? _gateway;
+
+  /// HTTP 即时确认回调（HTTP 降级模式专用）
+  final Future<void> Function(String sn)? onProbeSingle;
+
+  /// HTTP 命令发送回调（HTTP 降级模式专用）
   final Future<Map<String, dynamic>?> Function(
     String sn,
     String method,
     Map<String, dynamic>? params,
-  )? onSendCommand;
-
-  /// HTTP 即时确认回调（HTTP 降级模式专用）
-  final Future<void> Function(String sn)? onProbeSingle;
+  )? onHttpSendCommand;
 
   static const int maxConcurrency = 20;
   static const int highPriorityConcurrency = 40;
@@ -45,9 +52,11 @@ class BatchOperator {
 
   BatchOperator({
     required FarmStore store,
-    this.onSendCommand,
+    FarmCommandGateway? gateway,
     this.onProbeSingle,
-  })  : _store = store;
+    this.onHttpSendCommand,
+  })  : _store = store,
+        _gateway = gateway;
 
   // ═══════════════════════════════════════════════════════════
   // 公共 API
@@ -127,7 +136,44 @@ class BatchOperator {
       );
 
   // ═══════════════════════════════════════════════════════════
-  // Fan-Out 核心
+  // 群控便捷方法 — 返回 BatchHandle（支持进度流）
+  // ═══════════════════════════════════════════════════════════
+
+  /// 群控暂停（返回 BatchHandle，支持进度监听）
+  ///
+  /// 仅在 MQTT 模式下可用（HTTP 降级打印机不适用群控进度流）。
+  BatchHandle? batchPauseWithProgress(List<String> printerSns) {
+    if (_gateway == null) return null;
+    return _gateway.sendToMany(
+      sns: printerSns,
+      method: 'printer.print.pause',
+    );
+  }
+
+  /// 群控取消（返回 BatchHandle）
+  BatchHandle? batchCancelWithProgress(List<String> printerSns) {
+    if (_gateway == null) return null;
+    return _gateway.sendToMany(
+      sns: printerSns,
+      method: 'printer.print.cancel',
+    );
+  }
+
+  /// 群控急停（返回 BatchHandle，高优先级）
+  BatchHandle? batchEmergencyStopWithProgress() {
+    if (_gateway == null) return null;
+    final allSns = _store.allPrinters.map((p) => p.sn).toList();
+    return _gateway.sendToMany(
+      sns: allSns,
+      method: 'printer.gcode.script',
+      params: {'script': 'M112\n'},
+      timeout: emergencyStopTimeout,
+      maxConcurrency: highPriorityConcurrency,
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // Fan-Out 核心（混合 MQTT + HTTP）
   // ═══════════════════════════════════════════════════════════
 
   /// Fan-Out 并发执行
@@ -156,7 +202,6 @@ class BatchOperator {
       final startTime = DateTime.now();
 
       try {
-        // 获取打印机信息，确定通信方式
         final printer = _store.getPrinter(sn);
         if (printer == null) {
           final result = BatchResult(
@@ -171,34 +216,41 @@ class BatchOperator {
           return;
         }
 
-        if (printer.isMqtt && onSendCommand != null) {
-          // MQTT 通道
+        if (printer.isMqtt && _gateway != null) {
+          // ── MQTT 通道 → FarmCommandGateway ──
           try {
-            final response = await onSendCommand!(sn, method, params)
-                .timeout(timeout);
+            final cmdResult = await _gateway.sendToOne(
+              sn: sn,
+              method: method,
+              params: params,
+              timeout: timeout,
+            );
+
             final result = BatchResult(
               printerSn: sn,
-              success: response != null,
+              success: cmdResult.success,
               operation: operation.name,
-              duration: DateTime.now().difference(startTime),
+              duration: cmdResult.duration,
+              error: cmdResult.error,
             );
             _store.onBatchResult(sn, result);
             results.add(result);
-          } on TimeoutException {
+          } catch (e) {
             final result = BatchResult(
               printerSn: sn,
               success: false,
               operation: operation.name,
               duration: DateTime.now().difference(startTime),
-              error: '命令超时 (${timeout.inSeconds}s)',
+              error: e.toString(),
             );
             _store.onBatchResult(sn, result);
             results.add(result);
           }
         } else {
-          // HTTP 降级通道
+          // ── HTTP 降级通道 ──
           try {
-            await onSendCommand?.call(sn, method, params)
+            await onHttpSendCommand
+                ?.call(sn, method, params)
                 .timeout(timeout);
             // HTTP 命令完成后立即探测状态
             await onProbeSingle?.call(sn);

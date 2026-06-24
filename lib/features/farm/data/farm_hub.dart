@@ -91,10 +91,11 @@ class FarmHub {
     // final saved = await PrinterRegistry.loadAll();
     // store.loadFromRegistry(saved);
 
-    // 3. 启动连接监控
+    // 3. 启动连接监控（被动心跳 — 靠 MQTT 消息流驱动）
     connectionMonitor = FarmConnectionMonitor(
       onForceOffline: (sn, reason) => store.forceOffline(sn, reason),
     );
+    store.onHeartbeat = (sn) => connectionMonitor!.heartbeat(sn);
     connectionMonitor!.start();
 
     // 4. 启动 Broker 健康监控
@@ -155,8 +156,10 @@ class FarmHub {
     required String ip,
     required int port,
     required String accessCode,
+    BrokerConfig? brokerConfig,
   }) async {
-    if (_brokerConfig == null) {
+    final effectiveConfig = brokerConfig ?? _brokerConfig;
+    if (effectiveConfig == null) {
       return OnboardingResult.pushFailed('Broker 尚未连接');
     }
 
@@ -188,8 +191,8 @@ class FarmHub {
 
       // Step 5: 推送配置
       final mqttConfig = MqttConfig(
-        brokerAddress: _brokerConfig!.host,
-        brokerPort: _brokerConfig!.port,
+        brokerAddress: effectiveConfig.host,
+        brokerPort: effectiveConfig.port,
         username: 'printer_$sn',
         password: mqttPassword,
         instanceName: sn,

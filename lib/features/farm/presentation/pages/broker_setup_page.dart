@@ -11,7 +11,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../data/broker_connection_manager.dart';
-import '../../data/farm_mqtt_router.dart';
 import '../../data/farm_store.dart';
 import '../../data/printer_info.dart';
 
@@ -24,7 +23,6 @@ class BrokerSetupPage extends ConsumerStatefulWidget {
 }
 
 class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
-  FarmMqttRouter? _router;
   bool _isBusy = false;
   String? _errorMessage;
 
@@ -32,7 +30,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
   final _hostController = TextEditingController(text: '127.0.0.1');
   final _portController = TextEditingController(text: '1883');
   final _usernameController = TextEditingController(text: 'lava_app');
-  final _passwordController = TextEditingController();
+  final _passwordController = TextEditingController(text: 'lava-farm-admin');
 
   @override
   void dispose() {
@@ -40,7 +38,6 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
     _portController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
-    _router?.stop();
     super.dispose();
   }
 
@@ -250,19 +247,11 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
         host: host, port: port, username: username, password: password,
       );
 
-      // MQTT 已连接 → 创建 Router 订阅通配符 topic
-      final transport = manager.transport;
-      if (transport != null) {
-        final store = ref.read(farmStoreProvider);
-        _router = FarmMqttRouter(store: store, transport: transport);
-        await _router!.start();
-
-        // 注册预设设备
-        _registerDemoDevices(store);
-
-        // 启动主动探活：每分钟对所有设备发 server.info 确认在线
-        _router!.startProbing();
-      }
+      // MQTT 已连接 → Router 由 farmMqttRouterProvider 自动创建并 start()
+      // （farmMqttRouterProvider 监听了 brokerStateProvider，状态变为 connected 后自动创建 Router）
+      // 注册预设设备（演示用）
+      final store = ref.read(farmStoreProvider);
+      _registerDemoDevices(store);
     } catch (e) {
       setState(() => _errorMessage = '连接失败: $e');
     } finally {
@@ -272,8 +261,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
 
   Future<void> _disconnectFromBroker() async {
     try {
-      await _router?.stop();
-      _router = null;
+      // Router 由 farmMqttRouterProvider 监听到断连后自动 stop()
       await ref.read(brokerConnMgrProvider).disconnect();
     } catch (e) {
       setState(() => _errorMessage = '断开失败: $e');

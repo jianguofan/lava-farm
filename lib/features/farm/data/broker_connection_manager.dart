@@ -100,7 +100,8 @@ class BrokerConnectionManager {
   BrokerConfig? _lastConfig;
 
   // ── 状态管理 ──
-  final _stateController = StreamController<BrokerConnState>.broadcast();
+  // broadcast + onListen replay：新订阅者通过 microtask 立即收到当前状态
+  late final StreamController<BrokerConnState> _stateController;
   Stream<BrokerConnState> get stateStream => _stateController.stream;
   BrokerConnState _state = BrokerConnState.disconnected;
   BrokerConnState get state => _state;
@@ -109,10 +110,25 @@ class BrokerConnectionManager {
     required CredentialStore credentialStore,
     required Future<MqttTransportAdapter> Function(BrokerConfig config) mqttFactory,
   })  : _credentialStore = credentialStore,
-        _mqttFactory = mqttFactory;
+        _mqttFactory = mqttFactory {
+    _stateController = StreamController<BrokerConnState>.broadcast(
+      onListen: () {
+        final currentState = _state;
+        // microtask 延迟：避免在 listen() 回调中同步 add 导致 Riverpod 重入
+        Future.microtask(() {
+          if (!_stateController.isClosed) {
+            _stateController.add(currentState);
+          }
+        });
+      },
+    );
+  }
 
   /// 是否已连接
   bool get isConnected => _state == BrokerConnState.connected;
+
+  /// 当前 Broker 连接配置（用于入网时生成打印机 MQTT 配置）
+  BrokerConfig? get currentConfig => _lastConfig;
 
   /// 当前 Transport（连接成功后可用，用于 FarmMqttRouter 订阅 topic）
   MqttTransportAdapter? get transport => _transport;

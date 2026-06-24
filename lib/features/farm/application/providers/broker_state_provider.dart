@@ -4,19 +4,26 @@
 /// BrokerConnectionManager 负责自动重连（指数退避）。
 ///
 /// Riverpod Provider 层次:
-///   farmStoreProvider         ── 核心状态 Store（单例）
-///   mqttTransportFactory      ── MqttTransportAdapter 工厂
-///   brokerConnMgrProvider     ── BrokerConnectionManager（注入 factory）
-///   brokerStateProvider       ── Stream<BrokerConnState>（UI 绑定）
+///   farmStoreProvider            ── 核心状态 Store（单例）
+///   mqttTransportFactory         ── MqttTransportAdapter 工厂
+///   brokerConnMgrProvider        ── BrokerConnectionManager（注入 factory）
+///   brokerStateProvider          ── Stream<BrokerConnState>（UI 绑定）
+///   farmMqttRouterProvider       ── FarmMqttRouter（自动 start/stop）
+///   farmCommandGatewayProvider   ── FarmCommandGateway（从 Router 提取）
+///   cameraServiceProvider        ── CameraService（MQTT 发命令 + HTTP 轮询帧）
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/broker_connection_manager.dart';
+import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
 import '../../data/camera_service.dart';
+import '../../data/farm_hub.dart';
 import '../../data/farm_store.dart';
 import '../../data/mqtt_transport_impl.dart';
+import '../../data/printer_discovery.dart';
+import '../../data/unified_request_tracker.dart';
 import 'credential_store_provider.dart';
 import 'printer_list_provider.dart';
 
@@ -33,13 +40,18 @@ final farmStoreProvider = Provider<FarmStore>((ref) {
 
   // 桥接: FarmStore 变更 → 更新 PrinterRegistryNotifier（触发 UI 重建）
   store.addListener(() {
-    // 从 FarmStore 同步所有打印机状态到 Riverpod StateNotifier
     final notifier = ref.read(printerRegistryProvider.notifier);
-    // 有打印机的直接写入（不做全量 diff，FarmStore 的批处理通知已控制频率）
+    final before = notifier.allPrinters.length;
     for (final printer in store.allPrinters) {
       notifier.addPrinter(printer);
     }
+    final after = notifier.allPrinters.length;
+    if (before != after || store.allPrinters.length != before) {
+      print('[Bridge] FarmStore → UI: $before → $after 台 (FarmStore: ${store.allPrinters.length})');
+    }
   });
+
+  ref.onDispose(() => store.dispose());
 
   return store;
 });
@@ -54,14 +66,62 @@ final brokerConnMgrProvider = Provider<BrokerConnectionManager>((ref) {
   );
 });
 
-/// FarmMqttRouter — 连接后创建，订阅通配符 topic，消息路由到 FarmStore
+/// 活跃的 Router 实例缓存（避免重复创建）
+/// 使用模块级变量而非 StateProvider — 避免 Provider build 期间修改其他 Provider 违反 Riverpod 规则
+FarmMqttRouter? _activeRouter;
+
+/// FarmMqttRouter — 连接后自动创建、start、订阅通配符 topic
+///
+/// 依赖 brokerStateProvider（Stream）感知连接/断开变化。
+/// 连接建立时自动 start() + startProbing()，断开时自动 stop()。
 final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
+  final brokerState = ref.watch(brokerStateProvider).valueOrNull;
+  final isConnected = brokerState?.isConnected ?? false;
+
   final manager = ref.watch(brokerConnMgrProvider);
   final transport = manager.transport;
-  if (!manager.isConnected || transport == null) return null;
 
+  // 未连接或无 transport → 清理旧 Router
+  if (!isConnected || transport == null) {
+    if (_activeRouter != null) {
+      _activeRouter!.stop(); // fire-and-forget
+      _activeRouter = null;
+    }
+    return null;
+  }
+
+  // 已有活跃 Router → 复用
+  if (_activeRouter != null) return _activeRouter;
+
+  // 创建新 Router 并自动启动
   final store = ref.watch(farmStoreProvider);
-  return FarmMqttRouter(store: store, transport: transport);
+  final router = FarmMqttRouter(store: store, transport: transport);
+  _activeRouter = router;
+
+  // 异步启动（不阻塞 Provider 返回）
+  Future.microtask(() async {
+    await router.start();
+    router.startProbing();
+  });
+
+  ref.onDispose(() {
+    router.stop();
+    _activeRouter = null;
+  });
+
+  return router;
+});
+
+/// UnifiedRequestTracker — 从 Router 提取，供 BatchOperator 等使用
+final unifiedTrackerProvider = Provider<UnifiedRequestTracker?>((ref) {
+  final router = ref.watch(farmMqttRouterProvider);
+  return router?.tracker;
+});
+
+/// FarmCommandGateway — 从 Router 提取，供 BatchOperator 等使用
+final farmCommandGatewayProvider = Provider<FarmCommandGateway?>((ref) {
+  final router = ref.watch(farmMqttRouterProvider);
+  return router?.gateway;
 });
 
 /// Broker 连接状态流 Provider
@@ -103,4 +163,17 @@ final cameraServiceProvider = Provider<CameraService?>((ref) {
   final router = ref.watch(farmMqttRouterProvider);
   if (router == null) return null;
   return CameraService(router: router);
+});
+
+/// FarmHub Provider — 群控总入口（入网/发现/生命周期）
+final farmHubProvider = Provider<FarmHub>((ref) {
+  final store = ref.watch(farmStoreProvider);
+  final brokerConnMgr = ref.watch(brokerConnMgrProvider);
+  final credentialStore = ref.watch(credentialStoreProvider);
+  return FarmHub(
+    store: store,
+    brokerConnMgr: brokerConnMgr,
+    discovery: PrinterDiscovery(),
+    credentialStore: credentialStore,
+  );
 });

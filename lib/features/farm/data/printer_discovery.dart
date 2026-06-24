@@ -263,6 +263,71 @@ class PrinterDiscovery {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // 按 SN 反查 IP（解决 MQTT 自动发现后 IP 缺失问题）
+  // ═══════════════════════════════════════════════════════════
+
+  /// 子网扫描 + /server/info SN 匹配，返回打印机 IP
+  ///
+  /// 用于 MQTT 自动发现后只知道 SN 不知道 IP 的场景。
+  /// 原理: 并发扫描 192.168.x.2~254:7125，逐台调 /server/info，
+  /// 匹配 instance_name 后立即返回，不继续扫描。
+  ///
+  /// 返回 IP 地址，未找到返回 null。
+  static Future<String?> resolveIpBySn(
+    String sn, {
+    int port = _moonrakerPort,
+    int concurrency = _tcpConcurrency,
+    Duration tcpTimeout = _tcpTimeout,
+    Duration httpTimeout = const Duration(seconds: 3),
+  }) async {
+    final subnet = await detectSubnet();
+    if (subnet == null) return null;
+
+    final ips = List.generate(253, (i) => '$subnet.${i + 2}');
+    final semaphore = Semaphore(concurrency);
+    String? result;
+    bool found = false;
+
+    final futures = ips.map((ip) async {
+      if (found) return;
+      await semaphore.acquire();
+      if (found) { semaphore.release(); return; }
+      try {
+        // TCP 快速探测端口
+        final socket = await Socket.connect(ip, port, timeout: tcpTimeout);
+        socket.destroy();
+
+        // 端口开放 → 调 /server/info 查 instance_name
+        try {
+          final client = HttpClient();
+          client.connectionTimeout = httpTimeout;
+          final request = await client.getUrl(
+            Uri.parse('http://$ip:$port/server/info'),
+          );
+          final response = await request.close().timeout(httpTimeout);
+
+          if (response.statusCode == 200) {
+            final body = await response.transform(utf8.decoder).join();
+            final instanceName = _extractJsonString(body, 'instance_name');
+            if (instanceName == sn) {
+              result = ip;
+              found = true;
+            }
+          }
+          client.close();
+        } catch (_) {}
+      } on SocketException {
+        // 端口不可达
+      } catch (_) {} finally {
+        semaphore.release();
+      }
+    });
+
+    await Future.wait(futures);
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // 子网检测
   // ═══════════════════════════════════════════════════════════
 

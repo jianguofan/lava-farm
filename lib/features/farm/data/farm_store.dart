@@ -30,6 +30,13 @@ class FarmStore {
   /// 外部监听器列表
   final List<FarmStoreListener> _listeners = [];
 
+  /// 心跳回调（由 FarmConnectionMonitor 注入，用于被动心跳监测）
+  void Function(String sn)? onHeartbeat;
+
+  /// 去重统计
+  int _dupCount = 0;
+  DateTime _lastDupLog = DateTime.now();
+
   /// 批处理通知定时器
   Timer? _batchTimer;
   static const Duration _batchWindow = Duration(milliseconds: 100);
@@ -44,14 +51,18 @@ class FarmStore {
   /// [status] 展开后的遥测数据
   /// [eventTime] 来自 Moonraker eventtime 字段的数据时间戳
   void onMqttStatus(String sn, Map<String, dynamic> status, {DateTime? eventTime}) {
+    final now = DateTime.now();
+
     // 首次收到消息 → 自动注册（无需预先入网）
+    final isNewDevice = !_printers.containsKey(sn);
     var printer = _printers[sn];
     if (printer == null) {
+      print('[FarmStore] 🆕 自动注册新设备: $sn (MQTT auto-discover)');
       printer = FarmPrinterState.fromInfo(PrinterInfo(
         sn: sn,
         displayName: sn.substring(sn.length - 6), // 用 SN 后 6 位作为显示名
         ip: 'MQTT',
-        port: 1883,
+        port: 7125, // Moonraker HTTP API 端口，非 MQTT Broker 1883
         source: Source.mqtt,
       ));
       _printers[sn] = printer;
@@ -62,14 +73,63 @@ class FarmStore {
       if (!eventTime.isAfter(printer.lastDataTimestamp!)) return;
     }
 
-    printer.updateTelemetry(status, eventTime: eventTime);
-    printer.markFresh(Source.mqtt);
+    // 记录上一个打印状态用于检测变更
+    final previousPrintState = printer.printState?.value;
+    final wasOffline = !printer.isOnline;
 
-    // 如果之前离线，MQTT 状态到达 = 证明在线
-    if (printer.connectionState != FarmConnectionState.online) {
-      printer.connectionState = FarmConnectionState.online;
+    final anythingChanged = printer.updateTelemetry(status, eventTime: eventTime);
+    if (!anythingChanged) {
+      // 值去重：设备每秒推但内容没变（正常行为，不是代码重复拿）
+      _dupCount++;
+      final now2 = DateTime.now();
+      if (now2.difference(_lastDupLog).inSeconds >= 10) {
+        print('[FarmStore] 🔁 10s 内去重 $_dupCount 条重复消息（值未变，设备持续推送）');
+        _dupCount = 0;
+        _lastDupLog = now2;
+      }
+      return;
     }
 
+    printer.markFresh(Source.mqtt);
+
+    // 新设备首次出现 → 快照
+    if (isNewDevice) {
+      printer.addSnapshot(FarmSnapshot(
+        timestamp: now,
+        reason: '设备自动发现',
+        context: '首次通过 MQTT 状态消息发现设备',
+        data: {'sn': sn},
+      ));
+    }
+
+    // 从离线恢复 → 快照
+    if (wasOffline) {
+      printer.connectionState = FarmConnectionState.online;
+      printer.addSnapshot(FarmSnapshot(
+        timestamp: now,
+        reason: '设备上线',
+        context: 'MQTT 状态消息到达，设备恢复在线',
+        data: {'sn': sn},
+      ));
+    }
+
+    // 打印状态变更 → 快照
+    final currentPrintState = printer.printState?.value;
+    if (previousPrintState != null &&
+        currentPrintState != null &&
+        previousPrintState != currentPrintState) {
+      printer.addSnapshot(FarmSnapshot(
+        timestamp: now,
+        reason: '打印状态变更',
+        context: '$previousPrintState → $currentPrintState',
+        data: {
+          'from': previousPrintState,
+          'to': currentPrintState,
+        },
+      ));
+    }
+
+    onHeartbeat?.call(sn); // 被动心跳：收到任何 MQTT 消息即证明在线
     _notify();
   }
 
@@ -88,6 +148,7 @@ class FarmStore {
     printer.updateTelemetry(data, eventTime: pollTime);
     printer.markFresh(Source.http);
 
+    onHeartbeat?.call(sn);
     _notify();
   }
 
@@ -100,7 +161,7 @@ class FarmStore {
         sn: sn,
         displayName: sn.substring(sn.length - 6),
         ip: 'MQTT',
-        port: 1883,
+        port: 7125, // Moonraker HTTP API 端口，非 MQTT Broker 1883
         source: Source.mqtt,
       ));
       _printers[sn] = printer;
