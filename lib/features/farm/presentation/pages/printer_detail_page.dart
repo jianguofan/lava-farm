@@ -45,9 +45,10 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final printer = ref.watch(
-      printerRegistryProvider.select((state) => state[widget.sn]),
-    );
+    // 不用 .select() — 同一个 FarmPrinterState 对象引用不变时 Riverpod 不触发重建
+    // 因为 updateTelemetry 是原地修改对象属性
+    final registry = ref.watch(printerRegistryProvider);
+    final printer = registry[widget.sn];
 
     if (printer == null) {
       return Scaffold(
@@ -106,7 +107,7 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
             if (printer.isOnline) const SizedBox(height: 16),
 
             // ── 区块 4: 打印进度 ──
-            if (printer.isPrinting) ...[
+            if (printer.hasPrintJob) ...[
               _PrintProgressSection(printer: printer),
               const SizedBox(height: 16),
             ],
@@ -220,6 +221,23 @@ class _MetadataCard extends StatelessWidget {
                 _MetaRow('Klippy', printer.klippyState!),
             ],
             if (printer.cpuInfo != null) _MetaRow('CPU', printer.cpuInfo!),
+
+            // ── 设备实时状态 ──
+            if (printer.fanSpeed != null || printer.toolheadPosition != null) ...[
+              const SizedBox(height: 6),
+              if (printer.fanSpeed != null)
+                _MetaRow('风扇', '${(printer.fanSpeed!.value * 100).toInt()}% · ${printer.fanRpm?.value.toInt() ?? 0} RPM'),
+              if (printer.toolheadPosition != null)
+                _MetaRow('位置', 'X${printer.toolheadPosition!.value[0].toStringAsFixed(1)} Y${printer.toolheadPosition!.value[1].toStringAsFixed(1)}'),
+              if (printer.homedAxes != null)
+                _MetaRow('归零轴', printer.homedAxes!.value),
+            ],
+            if (printer.purifierMode != null) ...[
+              const SizedBox(height: 6),
+              _MetaRow('净化器', '模式${printer.purifierMode!.value} · 电压${printer.purifierPowerDetValue?.value.toStringAsFixed(1) ?? "?"}V'),
+            ],
+            if (printer.fileSize != null)
+              _MetaRow('文件大小', '${(printer.fileSize!.value / 1024 / 1024).toStringAsFixed(1)} MB'),
 
             // ── 状态时间 ──
             const SizedBox(height: 6),
@@ -402,21 +420,81 @@ class _TemperatureGauge extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 打印进度
+// 打印控制模块（缩略图 + 进度 + 层数 + 时间 + 暂停/取消）
 // ═══════════════════════════════════════════════════════════════
 
-class _PrintProgressSection extends StatelessWidget {
+class _PrintProgressSection extends ConsumerStatefulWidget {
   final FarmPrinterState printer;
   const _PrintProgressSection({required this.printer});
 
   @override
+  ConsumerState<_PrintProgressSection> createState() => _PrintProgressSectionState();
+}
+
+class _PrintProgressSectionState extends ConsumerState<_PrintProgressSection> {
+  bool _isBusy = false;
+
+  Future<void> _pause() async {
+    setState(() => _isBusy = true);
+    final router = ref.read(farmMqttRouterProvider);
+    await router?.sendCommand(widget.printer.sn, 'printer.print.pause');
+    if (mounted) setState(() => _isBusy = false);
+  }
+
+  Future<void> _resume() async {
+    setState(() => _isBusy = true);
+    final router = ref.read(farmMqttRouterProvider);
+    await router?.sendCommand(widget.printer.sn, 'printer.print.resume');
+    if (mounted) setState(() => _isBusy = false);
+  }
+
+  Future<void> _cancel() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('确认取消打印？'),
+        content: const Text('此操作将停止当前打印任务，不可恢复。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('返回')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('确认取消'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _isBusy = true);
+    final router = ref.read(farmMqttRouterProvider);
+    await router?.sendCommand(widget.printer.sn, 'printer.print.cancel');
+    if (mounted) setState(() => _isBusy = false);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final progress = printer.progress?.value ?? 0.0;
-    final file = printer.currentFile?.value ?? '未知文件';
-    final layers = (printer.layerNum != null && printer.totalLayers != null)
-        ? '${printer.layerNum!.value} / ${printer.totalLayers!.value} 层'
-        : null;
-    final eta = printer.estimatedTime?.value;
+    final p = widget.printer;
+    final progress = p.progress?.value ?? 0.0;
+    final file = p.currentFile?.value ?? '未知文件';
+    final layer = p.layerNum?.value;
+    final totalLayer = p.totalLayers?.value;
+    final isPaused = p.printState?.value == 'paused';
+    final isPrinting = p.isFileActive?.value == true || p.isPrinting;
+
+    // 剩余时间：优先用 estimated_time，否则根据进度推算
+    String etaText = '--';
+    if (p.estimatedTime?.value != null && p.estimatedTime!.value > 0) {
+      final secs = p.estimatedTime!.value.toInt();
+      etaText = '${secs ~/ 60}分${secs % 60}秒';
+    } else if (p.printDuration?.value != null && progress > 0) {
+      final elapsed = p.printDuration!.value;
+      final remaining = elapsed / progress - elapsed;
+      if (remaining > 0) {
+        final secs = remaining.toInt();
+        etaText = '${secs ~/ 60}分${secs % 60}秒';
+      }
+    }
 
     return Card(
       child: Padding(
@@ -424,31 +502,168 @@ class _PrintProgressSection extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ── 标题行 ──
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('打印进度', style: TextStyle(fontWeight: FontWeight.bold)),
-                Text(
-                  '${(progress * 100).toStringAsFixed(1)}%',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                const Icon(Icons.print, size: 18, color: Color(0xFF0C63E2)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '打印控制',
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: isPaused ? Colors.orange.shade50 : Colors.green.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    isPaused ? '⏸ 已暂停' : '🖨 打印中',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: isPaused ? Colors.orange.shade700 : Colors.green.shade700,
+                    ),
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: progress.clamp(0.0, 1.0),
-                minHeight: 8,
-              ),
+
+            // ── 缩略图 + 进度环 ──
+            Row(
+              children: [
+                // 缩略图占位（后续接摄像头）
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.image, size: 28, color: Colors.grey.shade400),
+                      const SizedBox(height: 2),
+                      Text('预览', style: TextStyle(fontSize: 9, color: Colors.grey.shade400)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                // 进度 + 百分比
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${(progress * 100).toStringAsFixed(1)}%',
+                        style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 4),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: progress.clamp(0.0, 1.0),
+                          minHeight: 10,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation(
+                            isPaused ? Colors.orange : const Color(0xFF0C63E2),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
+            const SizedBox(height: 16),
+
+            // ── 文件信息 ──
+            Text(file, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
             const SizedBox(height: 12),
-            _MetaRow('文件', file),
-            if (layers != null) _MetaRow('层数', layers),
-            if (eta != null)
-              _MetaRow('预估剩余', '${eta.toStringAsFixed(0)} 秒'),
-            if (printer.totalDuration != null)
-              _MetaRow('已用时间', '${(printer.totalDuration! / 60).toStringAsFixed(1)} 分钟'),
+
+            // ── 指标行：层数 / 剩余时间 ──
+            Row(
+              children: [
+                _MetricChip(
+                  icon: Icons.layers,
+                  label: '层数',
+                  value: layer != null && totalLayer != null
+                      ? '$layer / $totalLayer'
+                      : '--',
+                ),
+                const SizedBox(width: 12),
+                _MetricChip(
+                  icon: Icons.timer,
+                  label: '剩余时间',
+                  value: etaText,
+                ),
+                const SizedBox(width: 12),
+                _MetricChip(
+                  icon: Icons.speed,
+                  label: '文件大小',
+                  value: p.fileSize != null
+                      ? '${(p.fileSize!.value / 1024 / 1024).toStringAsFixed(1)} MB'
+                      : '--',
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // ── 控制按钮 ──
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _isBusy ? null : (isPaused ? _resume : _pause),
+                    icon: Icon(isPaused ? Icons.play_arrow : Icons.pause, size: 18),
+                    label: Text(isPaused ? '继续' : '暂停'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _isBusy ? null : _cancel,
+                    icon: const Icon(Icons.stop, size: 18),
+                    label: const Text('取消'),
+                    style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MetricChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  const _MetricChip({required this.icon, required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          children: [
+            Icon(icon, size: 18, color: Colors.grey.shade600),
+            const SizedBox(height: 4),
+            Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            Text(label, style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
           ],
         ),
       ),
@@ -1051,14 +1266,36 @@ class _RawStateSnapshotCard extends StatefulWidget {
 class _RawStateSnapshotCardState extends State<_RawStateSnapshotCard> {
   bool _expanded = false;
 
-  /// updateTelemetry 中已提取的键前缀集合
+  /// updateTelemetry 中已提取的键前缀集合（精确匹配或前缀匹配）
   static const _extractedPrefixes = {
+    // 挤出机（extruder1/2/3 等）
+    'extruder1.', 'extruder2.', 'extruder3.', 'extruder4.',
     'extruder.temperature', 'extruder.target',
-    'heater_bed.temperature', 'heater_bed.target',
+    // 热床
+    'heater_bed.temperature', 'heater_bed.target', 'heater_bed.power',
+    // 打印状态
     'print_stats.state', 'print_stats.filename',
     'print_stats.total_duration', 'print_stats.filament_used',
     'print_stats.info.layer_num', 'print_stats.info.total_layer',
-    'virtual_sdcard.progress',
+    'print_stats.info.current_layer',
+    'print_stats.print_duration', 'print_stats.message',
+    // 虚拟 SD 卡
+    'virtual_sdcard.progress', 'virtual_sdcard.file_path',
+    'virtual_sdcard.file_size', 'virtual_sdcard.file_position',
+    'virtual_sdcard.is_active',
+    // 风扇
+    'fan.speed', 'fan.rpm',
+    // 工具头
+    'toolhead.position', 'toolhead.homed_axes',
+    'toolhead.max_accel', 'toolhead.max_velocity',
+    'toolhead.estimated_print_time',
+    // 净化器
+    'purifier.mode', 'purifier.power_det_value', 'purifier.power_detected',
+    // Snapmaker 特有
+    'display_status.progress',
+    'extruder.power',
+    'gcode_move.speed',
+    'idle_timeout.printing_time',
   };
 
   @override
@@ -1141,6 +1378,50 @@ class _RawStateSnapshotCardState extends State<_RawStateSnapshotCard> {
           ),
           if (_expanded) ...[
             const Divider(height: 1),
+            // ── 全量 JSON 区（可选择复制）──
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Text('全量 JSON', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  _CopyButton(
+                    label: '复制全部',
+                    data: const JsonEncoder.withIndent('  ').convert(snapshot),
+                  ),
+                  const SizedBox(width: 6),
+                  _CopyButton(
+                    label: '复制额外',
+                    data: const JsonEncoder.withIndent('  ').convert({for (final k in extra) k: snapshot[k]}),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 300),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E1E1E),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(snapshot),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      color: Color(0xFFD4D4D4),
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            // ── 分类字段列表 ──
             Padding(
               padding: const EdgeInsets.all(12),
               child: Column(
@@ -1161,11 +1442,21 @@ class _RawStateSnapshotCardState extends State<_RawStateSnapshotCard> {
                     const SizedBox(height: 8),
                   ],
                   if (extra.isNotEmpty) ...[
-                    Text('额外字段（未在 updateTelemetry 中提取）',
-                        style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.orange.shade700)),
+                    Row(
+                      children: [
+                        Text('额外字段（未在 updateTelemetry 中提取）',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.orange.shade700)),
+                        const Spacer(),
+                        _CopyButton(
+                          label: '复制',
+                          data: const JsonEncoder.withIndent('  ')
+                              .convert({for (final k in extra) k: snapshot[k]}),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 4),
                     ...extra.map((k) => _SnapshotFieldRow(
                           keyName: k,
@@ -1486,6 +1777,45 @@ class _RawMessageTileState extends State<_RawMessageTile> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 复制按钮
+// ═══════════════════════════════════════════════════════════════
+
+class _CopyButton extends StatelessWidget {
+  final String label;
+  final String data;
+  const _CopyButton({required this.label, required this.data});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: data));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("$label 已复制"), duration: const Duration(seconds: 1)),
+        );
+      },
+      borderRadius: BorderRadius.circular(4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: Colors.grey.shade300),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.copy, size: 12, color: Colors.grey.shade600),
+            const SizedBox(width: 3),
+            Text(label, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+          ],
+        ),
       ),
     );
   }

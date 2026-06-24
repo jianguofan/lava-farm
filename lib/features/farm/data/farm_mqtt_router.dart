@@ -86,6 +86,13 @@ class FarmMqttRouter {
     // 通配符订阅 — 一条订阅覆盖全部设备
     await _transport.subscribe('+/status', qos: 1);
     await _transport.subscribe('+/notification', qos: 1);
+
+    // 对已注册设备发送 printer.objects.subscribe 激活状态推送
+    // Snapmaker 的 status_interval 配置已让打印机自动推送大部分状态，
+    // 但 subscribe 确保所有需要的对象都被推送
+    for (final device in _store.allPrinters) {
+      _subscribeDeviceObjects(device.sn);
+    }
   }
 
   /// 启动元数据定期刷新
@@ -187,22 +194,35 @@ class FarmMqttRouter {
   /// 发送 printer.objects.query 获取完整 Moonraker 对象树，
   /// 同时拉取 server.info + printer.info 元数据。
   Future<void> fetchFullState(String sn) async {
+    print('[Router] 🔍 fetchFullState($sn) 开始...');
     try {
       // ── 1. printer.objects.query → 全量基线状态 ──
       final fullState = await sendCommand(sn, 'printer.objects.query', {
         'objects': {
+          'extruder': null,
           'extruder1': null,
           'extruder2': null,
           'extruder3': null,
           'heater_bed': null,
           'print_stats': null,
+          'job': null,
           'virtual_sdcard': null,
           'toolhead': null,
           'fan': null,
+          'fan_generic cavity_fan': null,
           'display_status': null,
           'purifier': null,
           'motion_report': null,
           'gcode_move': null,
+          'idle_timeout': null,
+          'file_metadata': null,
+          'machine_state_manager': null,
+          'webhooks': null,
+          'led cavity_led': null,
+          'print_task_config': null,
+          'filament_feed left': null,
+          'filament_feed right': null,
+          'filament_detect': null,
         },
       });
       if (fullState.success && fullState.data != null) {
@@ -273,8 +293,66 @@ class FarmMqttRouter {
       if (sysInfo.success && sysInfo.data != null) {
         _extractAndUpdateIp(sn, sysInfo.data!);
       }
+      // ── 5. printer.objects.subscribe → 激活持续状态推送 ──
+      await _subscribeDeviceObjects(sn);
+
+      print('[Router] ✅ fetchFullState($sn) 完成');
+    } catch (e) {
+      print('[Router] ❌ fetchFullState($sn) 失败: $e');
+    }
+  }
+
+  /// 向设备发送 printer.objects.subscribe，激活指定对象的状态推送
+  Future<void> _subscribeDeviceObjects(String sn) async {
+    try {
+      await sendCommand(sn, 'printer.objects.subscribe', {
+        'objects': {
+          // 挤出机 0-3（extruder + extruder1/2/3）
+          'extruder': null,
+          'extruder1': null,
+          'extruder2': null,
+          'extruder3': null,
+          // 热床
+          'heater_bed': null,
+          // 打印统计 + 任务
+          'print_stats': null,
+          'job': null,
+          // 虚拟 SD 卡
+          'virtual_sdcard': null,
+          // 工具头
+          'toolhead': null,
+          // 风扇（模型风扇 + 腔体风扇）
+          'fan': null,
+          'fan_generic cavity_fan': null,
+          // 显示状态（含 progress）
+          'display_status': null,
+          // 净化器
+          'purifier': null,
+          // 运动报告
+          'motion_report': null,
+          // GCode 移动
+          'gcode_move': null,
+          // 空闲超时（含 printing_time）
+          'idle_timeout': null,
+          // 文件元数据（gcode_start_byte / end_byte / estimated_time）
+          'file_metadata': null,
+          // 设备状态管理（main_state / action_code）
+          'machine_state_manager': null,
+          // 网络钩子（MQTT 连接状态）
+          'webhooks': null,
+          // LED
+          'led cavity_led': null,
+          // 打印任务配置
+          'print_task_config': null,
+          // 进料模块
+          'filament_feed left': null,
+          'filament_feed right': null,
+          // 耗材检测
+          'filament_detect': null,
+        },
+      });
     } catch (_) {
-      // 拉取失败不影响已有状态
+      // subscribe 失败不阻塞
     }
   }
 
@@ -349,6 +427,8 @@ class FarmMqttRouter {
     final expanded = <String, dynamic>{};
     _expandMap(status, '', expanded);
 
+    final isNewDevice = _store.getPrinter(sn) == null;
+
     _store.onMqttStatus(sn, expanded, eventTime: eventTime);
 
     // 收集原始消息和完整状态快照（用于调试/分析）
@@ -357,6 +437,11 @@ class FarmMqttRouter {
       p.updateRawStateSnapshot(expanded);
       return p;
     });
+
+    // 新发现设备 → 订阅对象 + 解析 IP
+    if (isNewDevice) {
+      _subscribeDeviceObjects(sn);
+    }
 
     // MQTT 自动发现的设备没有真实 IP → 后台子网扫描解析
     final printer = _store.getPrinter(sn);

@@ -120,6 +120,26 @@ class FarmPrinterState {
   Staleable<int>? totalLayers;
   Staleable<double>? estimatedTime;  // 预估剩余时间 (秒)
 
+  // ── Snapmaker 扩展遥测 ──
+  Staleable<double>? fanSpeed;        // fan.speed (0.0~1.0)
+  Staleable<double>? fanRpm;          // fan.rpm
+  Staleable<List<double>>? toolheadPosition; // toolhead.position [x, y]
+  Staleable<String>? homedAxes;       // toolhead.homed_axes
+  Staleable<double>? printDuration;   // print_stats.print_duration (秒)
+  Staleable<String>? printMessage;    // print_stats.message
+  Staleable<int>? fileSize;           // virtual_sdcard.file_size
+  Staleable<int>? filePosition;       // virtual_sdcard.file_position
+  Staleable<bool>? isFileActive;      // virtual_sdcard.is_active
+  Staleable<int>? purifierMode;       // purifier.mode
+  Staleable<double>? purifierPowerDetValue; // purifier.power_det_value
+  Staleable<bool>? purifierPowerDetected;   // purifier.power_detected
+  Staleable<double>? bedPower;        // heater_bed.power
+  Staleable<double>? maxAccel;        // toolhead.max_accel
+  Staleable<double>? maxVelocity;     // toolhead.max_velocity
+  Staleable<double>? extruderPower;   // extruder.power
+  Staleable<double>? moveSpeed;       // gcode_move.speed
+  Staleable<double>? printingTime;    // idle_timeout.printing_time (已打印秒数)
+
   // ── 累积指标（增量累加） ──
   double? totalDuration;
   double? filamentUsed;
@@ -182,8 +202,20 @@ class FarmPrinterState {
   // ── 派生属性 ──
 
   bool get isOnline => connectionState == FarmConnectionState.online;
-  bool get isPrinting => printState?.value == 'printing';
+  /// 是否正在打印（综合多种信号源判断）
+  bool get isPrinting =>
+      printState?.value == 'printing' ||
+      isFileActive?.value == true ||
+      (currentFile != null && progress != null && progress!.value > 0 && progress!.value < 1.0);
   bool get isPaused => printState?.value == 'paused';
+
+  /// 是否有打印任务（打印中或暂停中），用于显示打印控制面板
+  bool get hasPrintJob =>
+      isPrinting ||
+      isPaused ||
+      isFileActive?.value == true ||
+      currentFile != null ||
+      fileSize != null;
   bool get isMqtt => source == Source.mqtt;
   bool get isHttp => source == Source.http;
 
@@ -265,23 +297,112 @@ class FarmPrinterState {
           Staleable((data['heater_bed.target'] as num).toDouble());
     }
 
-    // 打印状态
+    // 打印状态 & 文件
     if (data.containsKey('print_stats.state')) {
       printState = Staleable(data['print_stats.state'] as String);
     }
     if (data.containsKey('virtual_sdcard.progress')) {
       progress = Staleable((data['virtual_sdcard.progress'] as num).toDouble());
+    } else if (data.containsKey('virtual_sdcard.file_position') && data.containsKey('virtual_sdcard.file_size')) {
+      // Snapmaker: 用 file_position/file_size 算进度
+      final pos = (data['virtual_sdcard.file_position'] as num).toDouble();
+      final size = (data['virtual_sdcard.file_size'] as num).toDouble();
+      if (size > 0) progress = Staleable(pos / size);
     }
     if (data.containsKey('print_stats.filename')) {
       currentFile = Staleable(data['print_stats.filename'] as String);
+    } else if (data.containsKey('virtual_sdcard.file_path')) {
+      final path = data['virtual_sdcard.file_path'] as String;
+      currentFile = Staleable(path.split('/').last);
     }
 
-    // 层数
+    // 层数（Snapmaker: print_stats.info.current_layer）
     if (data.containsKey('print_stats.info.layer_num')) {
-      layerNum = Staleable(data['print_stats.info.layer_num'] as int);
+      layerNum = Staleable((data['print_stats.info.layer_num'] as num).toInt());
+    } else if (data.containsKey('print_stats.info.current_layer')) {
+      layerNum = Staleable((data['print_stats.info.current_layer'] as num).toInt());
     }
     if (data.containsKey('print_stats.info.total_layer')) {
-      totalLayers = Staleable(data['print_stats.info.total_layer'] as int);
+      totalLayers = Staleable((data['print_stats.info.total_layer'] as num).toInt());
+    }
+
+    // 打印耗时
+    if (data.containsKey('print_stats.print_duration')) {
+      printDuration = Staleable((data['print_stats.print_duration'] as num).toDouble());
+    }
+    if (data.containsKey('print_stats.message')) {
+      printMessage = Staleable(data['print_stats.message'] as String);
+    }
+
+    // 文件信息
+    if (data.containsKey('virtual_sdcard.file_size')) {
+      fileSize = Staleable((data['virtual_sdcard.file_size'] as num).toInt());
+    }
+    if (data.containsKey('virtual_sdcard.file_position')) {
+      filePosition = Staleable((data['virtual_sdcard.file_position'] as num).toInt());
+    }
+    if (data.containsKey('virtual_sdcard.is_active')) {
+      isFileActive = Staleable(data['virtual_sdcard.is_active'] as bool);
+    }
+
+    // 风扇
+    if (data.containsKey('fan.speed')) {
+      fanSpeed = Staleable((data['fan.speed'] as num).toDouble());
+    }
+    if (data.containsKey('fan.rpm')) {
+      fanRpm = Staleable((data['fan.rpm'] as num).toDouble());
+    }
+
+    // 工具头
+    if (data.containsKey('toolhead.position')) {
+      final pos = data['toolhead.position'] as List;
+      toolheadPosition = Staleable(pos.map((e) => (e as num).toDouble()).toList());
+    }
+    if (data.containsKey('toolhead.homed_axes')) {
+      homedAxes = Staleable(data['toolhead.homed_axes'] as String);
+    }
+    if (data.containsKey('toolhead.max_accel')) {
+      maxAccel = Staleable((data['toolhead.max_accel'] as num).toDouble());
+    }
+    if (data.containsKey('toolhead.max_velocity')) {
+      maxVelocity = Staleable((data['toolhead.max_velocity'] as num).toDouble());
+    }
+
+    // 净化器
+    if (data.containsKey('purifier.mode')) {
+      purifierMode = Staleable((data['purifier.mode'] as num).toInt());
+    }
+    if (data.containsKey('purifier.power_det_value')) {
+      purifierPowerDetValue = Staleable((data['purifier.power_det_value'] as num).toDouble());
+    }
+    if (data.containsKey('purifier.power_detected')) {
+      purifierPowerDetected = Staleable(data['purifier.power_detected'] as bool);
+    }
+
+    // 热床功率（Snapmaker 可能只上报 power，无 temperature）
+    if (data.containsKey('heater_bed.power')) {
+      bedPower = Staleable((data['heater_bed.power'] as num).toDouble());
+    }
+
+    // display_status.progress → 打印进度（Snapmaker 特有）
+    if (data.containsKey('display_status.progress')) {
+      final dp = (data['display_status.progress'] as num).toDouble();
+      progress = Staleable(dp.clamp(0.0, 1.0));
+    }
+
+    // 挤出机功率
+    if (data.containsKey('extruder.power')) {
+      extruderPower = Staleable((data['extruder.power'] as num).toDouble());
+    }
+
+    // 移动速度
+    if (data.containsKey('gcode_move.speed')) {
+      moveSpeed = Staleable((data['gcode_move.speed'] as num).toDouble());
+    }
+
+    // 已打印时间
+    if (data.containsKey('idle_timeout.printing_time')) {
+      printingTime = Staleable((data['idle_timeout.printing_time'] as num).toDouble());
     }
 
     // 累积指标：增量计算
@@ -331,6 +452,24 @@ class FarmPrinterState {
     layerNum = layerNum?.markStale();
     totalLayers = totalLayers?.markStale();
     estimatedTime = estimatedTime?.markStale();
+    fanSpeed = fanSpeed?.markStale();
+    fanRpm = fanRpm?.markStale();
+    toolheadPosition = toolheadPosition?.markStale();
+    homedAxes = homedAxes?.markStale();
+    printDuration = printDuration?.markStale();
+    printMessage = printMessage?.markStale();
+    fileSize = fileSize?.markStale();
+    filePosition = filePosition?.markStale();
+    isFileActive = isFileActive?.markStale();
+    purifierMode = purifierMode?.markStale();
+    purifierPowerDetValue = purifierPowerDetValue?.markStale();
+    purifierPowerDetected = purifierPowerDetected?.markStale();
+    bedPower = bedPower?.markStale();
+    maxAccel = maxAccel?.markStale();
+    maxVelocity = maxVelocity?.markStale();
+    extruderPower = extruderPower?.markStale();
+    moveSpeed = moveSpeed?.markStale();
+    printingTime = printingTime?.markStale();
   }
 
   /// 添加快照（环形缓冲，超出则移除最旧的）

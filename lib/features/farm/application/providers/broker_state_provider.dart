@@ -41,13 +41,10 @@ final farmStoreProvider = Provider<FarmStore>((ref) {
   // 桥接: FarmStore 变更 → 更新 PrinterRegistryNotifier（触发 UI 重建）
   store.addListener(() {
     final notifier = ref.read(printerRegistryProvider.notifier);
-    final before = notifier.allPrinters.length;
     for (final printer in store.allPrinters) {
+      // 必须创建副本：Riverpod 的 select() 用 == 比较，
+      // 同一个对象引用会被视为未变更，导致 widget 不重建
       notifier.addPrinter(printer);
-    }
-    final after = notifier.allPrinters.length;
-    if (before != after || store.allPrinters.length != before) {
-      print('[Bridge] FarmStore → UI: $before → $after 台 (FarmStore: ${store.allPrinters.length})');
     }
   });
 
