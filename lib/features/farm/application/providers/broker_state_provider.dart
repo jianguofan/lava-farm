@@ -16,6 +16,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/batch_print_coordinator.dart';
 import '../../data/broker_connection_manager.dart';
+import '../../data/farm_logger.dart';
 import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
@@ -39,17 +40,23 @@ final mqttTransportFactoryProvider =
 final farmStoreProvider = Provider<FarmStore>((ref) {
   final store = FarmStore();
 
-  // 桥接: FarmStore 变更 → 更新 PrinterRegistryNotifier（触发 UI 重建）
+  // 桥接: FarmStore 变更 → 仅更新脏 SN 的打印机（避免遍历全部）
   store.addListener(() {
     final notifier = ref.read(printerRegistryProvider.notifier);
-    for (final printer in store.allPrinters) {
-      // 必须创建副本：Riverpod 的 select() 用 == 比较，
-      // 同一个对象引用会被视为未变更，导致 widget 不重建
-      notifier.addPrinter(printer);
+    final dirtySns = store.dirtySns;
+    for (final sn in dirtySns) {
+      final printer = store.getPrinter(sn);
+      if (printer != null) {
+        notifier.addPrinter(printer);
+      }
     }
+    store.clearDirtySns();
   });
 
-  ref.onDispose(() => store.dispose());
+  ref.onDispose(() {
+    store.dispose();
+    FarmLogger.instance.dispose();
+  });
 
   return store;
 });

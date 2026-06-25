@@ -20,12 +20,13 @@
 ///   MQTT {SN}/response   → _tracker.complete(sn, json)
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'broker_connection_manager.dart';
 import 'farm_command_gateway.dart';
+import 'farm_logger.dart';
 import 'farm_printer_state.dart';
 import 'farm_store.dart';
+import 'mqtt_message_processor.dart';
 import 'printer_info.dart';
 import 'unified_request_tracker.dart';
 
@@ -48,6 +49,9 @@ class FarmMqttRouter {
   /// 防重入：start() 只能调用一次
   bool _started = false;
 
+  /// MQTT 消息后台处理器（persistent isolate：UTF-8解码 + JSON解析 + Map展平）
+  late final MqttMessageProcessor _processor;
+
   /// MQTT 消息流订阅（stop 时取消，防止断连重连后重复监听）
   StreamSubscription<MqttMessage>? _messageSub;
 
@@ -60,6 +64,9 @@ class FarmMqttRouter {
     _gateway = FarmCommandGateway(
       tracker: _tracker,
       transport: transport,
+    );
+    _processor = MqttMessageProcessor(
+      onBatchProcessed: _onBatchProcessed,
     );
   }
 
@@ -113,6 +120,7 @@ class FarmMqttRouter {
     _probeTimer = null;
     _messageSub?.cancel();
     _messageSub = null;
+    _processor.dispose();
     _tracker.cancelAll();
     _seenTopics.clear();
   }
@@ -237,7 +245,7 @@ class FarmMqttRouter {
 
         if (status != null) {
           final expanded = <String, dynamic>{};
-          _expandMap(status, '', expanded);
+          FarmMqttRouter.expandMap(status, '', expanded);
 
           _store.updatePrinter(sn, (p) {
             p.updateTelemetry(expanded, eventTime: eventTime);
@@ -367,86 +375,82 @@ class FarmMqttRouter {
   void _onMessage(MqttMessage msg) {
     final topic = msg.topic;
     final sn = _extractSn(topic);
-    final raw = utf8.decode(msg.payload);
 
-    try {
-      final json = jsonDecode(raw) as Map<String, dynamic>;
-
-      if (topic.endsWith('/status')) {
-        // 首次见到某个 SN 的 status 消息时打印
-        if (_seenTopics.add(sn)) {
-          print('[Router] 📡 首次收到设备消息: $sn (topic: $topic)');
-          print('[Router]     已注册设备: ${_store.allPrinters.map((p) => p.sn).toList()}');
-        }
-        // 每 30 秒汇总一次
-        final now = DateTime.now();
-        if (now.difference(_lastTopicReport).inSeconds >= 30) {
-          print('[Router] 📊 活跃设备 (${_seenTopics.length}): ${_seenTopics.toList().take(10).join(", ")}${_seenTopics.length > 10 ? "..." : ""}');
-          _lastTopicReport = now;
-        }
-        _handleStatus(sn, json);
-      } else if (topic.endsWith('/notification')) {
-        _handleNotification(sn, json);
-      } else if (topic.endsWith('/response')) {
-        _tracker.complete(sn, json);
+    // 诊断日志（轻量，仅 topic 前缀检查）
+    if (topic.endsWith('/status')) {
+      if (_seenTopics.add(sn)) {
+        print('[Router] 📡 首次收到设备消息: $sn (topic: $topic)');
+        print('[Router]     已注册设备: ${_store.allPrinters.map((p) => p.sn).toList()}');
       }
-    } catch (e) {
-      print('[Router] ❌ 消息处理失败: topic=$topic sn=$sn error=$e');
-      print('[Router]     payload 前 200 字符: ${raw.length > 200 ? raw.substring(0, 200) : raw}');
+      final now = DateTime.now();
+      if (now.difference(_lastTopicReport).inSeconds >= 30) {
+        print('[Router] 📊 活跃设备 (${_seenTopics.length}): ${_seenTopics.toList().take(10).join(", ")}${_seenTopics.length > 10 ? "..." : ""}');
+        _lastTopicReport = now;
+      }
+    }
+
+    // 交给后台 isolate 异步处理（UTF-8解码 + JSON解析 + Map展平）
+    _processor.enqueue(topic, msg.payload);
+
+    // 响应消息需要低延迟 → 立即发送当前批次
+    if (topic.endsWith('/response')) {
+      _processor.flush();
     }
   }
 
-  /// 处理状态推送
-  ///
-  /// Moonraker notify_status_update 格式:
-  ///   {"jsonrpc":"2.0", "method":"notify_status_update",
-  ///    "params":[{"extruder":{"temperature":210.5},...}, 1718700000.0]}
-  void _handleStatus(String sn, Map<String, dynamic> json) {
-    // 提取状态数据
-    Map<String, dynamic>? status;
-    DateTime? eventTime;
-
-    if (json['params'] is List && (json['params'] as List).isNotEmpty) {
-      status = (json['params'] as List)[0] as Map<String, dynamic>?;
-    }
-
-    // 提取 eventtime（UNIX 时间戳，秒）
-    if (json['params'] is List && (json['params'] as List).length >= 2) {
-      final rawTime = (json['params'] as List)[1];
-      if (rawTime is num) {
-        eventTime = DateTime.fromMillisecondsSinceEpoch(
-          (rawTime * 1000).toInt(),
-        );
+  /// isolate 处理完毕后回调（在主 isolate 执行）
+  void _onBatchProcessed(List<ProcessedMessage> batch) {
+    // 诊断日志：确认 isolate → 主 isolate 数据流是否通畅
+    if (_seenTopics.length <= 2) {
+      print('[Router] 📦 收到 isolate 批次: ${batch.length} 条');
+      for (final m in batch) {
+        print('[Router]    topic=${m.topic} sn=${m.sn} hasExpanded=${m.expandedStatus != null}');
       }
     }
+    for (final msg in batch) {
+      try {
+        if (msg.topic.endsWith('/status')) {
+          _handleStatusProcessed(msg);
+          FarmLogger.instance.logStatusReceived(msg.sn, msg.expandedStatus ?? {},
+              eventTime: msg.eventTime);
+        } else if (msg.topic.endsWith('/notification')) {
+          _handleNotification(msg.sn, msg.rawJson);
+          FarmLogger.instance.logNotificationReceived(msg.sn, msg.rawJson);
+        } else if (msg.topic.endsWith('/response')) {
+          _tracker.complete(msg.sn, msg.rawJson);
+          FarmLogger.instance.logCommandResponse(msg.sn, msg.rawJson);
+        }
+      } catch (e) {
+        print('[Router] ❌ 消息分发失败: topic=${msg.topic} sn=${msg.sn} error=$e');
+      }
+    }
+  }
 
-    if (status == null) return;
+  /// 处理 isolate 预处理的状态推送（expandedStatus + eventTime 已在 isolate 中计算好）
+  void _handleStatusProcessed(ProcessedMessage msg) {
+    if (msg.expandedStatus == null) {
+      print('[Router] ⚠️ status 消息无 expandedStatus: sn=${msg.sn} topic=${msg.topic}');
+      return;
+    }
 
-    // 展开嵌套字段: {"extruder": {"temperature": 210.5}}
-    // 变为: {"extruder.temperature": 210.5}
-    final expanded = <String, dynamic>{};
-    _expandMap(status, '', expanded);
+    final isNewDevice = _store.getPrinter(msg.sn) == null;
 
-    final isNewDevice = _store.getPrinter(sn) == null;
+    _store.onMqttStatus(msg.sn, msg.expandedStatus!, eventTime: msg.eventTime);
 
-    _store.onMqttStatus(sn, expanded, eventTime: eventTime);
-
-    // 收集原始消息和完整状态快照（用于调试/分析）
-    _store.updatePrinter(sn, (p) {
-      p.addRawMessage(json);
-      p.updateRawStateSnapshot(expanded);
+    // 收集原始消息和完整状态快照
+    _store.updatePrinter(msg.sn, (p) {
+      p.addRawMessage(msg.rawJson);
+      p.updateRawStateSnapshot(msg.expandedStatus!);
       return p;
     });
 
-    // 新发现设备 → 订阅对象 + 解析 IP
     if (isNewDevice) {
-      _subscribeDeviceObjects(sn);
+      _subscribeDeviceObjects(msg.sn);
     }
 
-    // MQTT 自动发现的设备没有真实 IP → 后台子网扫描解析
-    final printer = _store.getPrinter(sn);
+    final printer = _store.getPrinter(msg.sn);
     if (printer != null && printer.ip == 'MQTT') {
-      _resolveIpInBackground(sn);
+      _resolveIpInBackground(msg.sn);
     }
   }
 
@@ -526,13 +530,13 @@ class FarmMqttRouter {
     return parts.first;
   }
 
-  /// 展开嵌套 Map: {"a":{"b":1}} → {"a.b":1}
-  void _expandMap(Map<String, dynamic> source, String prefix,
+  /// 展开嵌套 Map（用于 fetchFullState 等低频路径，仍在主 isolate 执行）
+  static void expandMap(Map<String, dynamic> source, String prefix,
       Map<String, dynamic> target) {
     for (final entry in source.entries) {
       final key = prefix.isEmpty ? entry.key : '$prefix.${entry.key}';
       if (entry.value is Map<String, dynamic>) {
-        _expandMap(entry.value as Map<String, dynamic>, key, target);
+        expandMap(entry.value as Map<String, dynamic>, key, target);
       } else {
         target[key] = entry.value;
       }

@@ -33,6 +33,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'broker_connection_manager.dart';
+import 'farm_logger.dart';
 import 'unified_request_tracker.dart';
 
 /// 单条命令执行结果
@@ -385,6 +386,8 @@ class FarmCommandGateway {
 
     final payload = utf8.encode(jsonEncode(request));
     await _transport.publish('$sn/request', payload, qos: 1);
+
+    FarmLogger.instance.logCommandSent(sn, method, params);
   }
 }
 

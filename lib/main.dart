@@ -8,6 +8,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'features/farm/data/farm_logger.dart';
 import 'features/farm/presentation/pages/broker_setup_page.dart';
 import 'features/farm/presentation/pages/farm_dashboard_page.dart';
 import 'features/farm/presentation/pages/discovery_wizard_page.dart';
@@ -16,6 +17,9 @@ import 'features/farm/presentation/pages/batch_print_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 初始化本地日志系统
+  FarmLogger.instance.init();
 
   // 允许 Freestyle 窗口（macOS 隐藏标题栏时可用）
   // await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);

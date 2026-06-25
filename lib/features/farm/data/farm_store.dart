@@ -41,6 +41,15 @@ class FarmStore {
   Timer? _batchTimer;
   static const Duration _batchWindow = Duration(milliseconds: 100);
 
+  /// 本批次内发生变更的打印机 SN（用于 Bridge 精确通知）
+  final Set<String> _dirtySns = {};
+
+  /// 获取本批次脏 SN 快照（Bridge 用它遍历而非 allPrinters）
+  Set<String> get dirtySns => Set.unmodifiable(_dirtySns);
+
+  /// 清空脏标记（Bridge 通知完毕后调用）
+  void clearDirtySns() => _dirtySns.clear();
+
   // ═══════════════════════════════════════════════════════════
   // 写入方法 — 所有数据源唯一入口
   // ═══════════════════════════════════════════════════════════
@@ -130,9 +139,9 @@ class FarmStore {
     }
 
     onHeartbeat?.call(sn); // 被动心跳：收到任何 MQTT 消息即证明在线
+    _dirtySns.add(sn);
     _notify();
   }
-
   /// HTTP 轮询结果（降级通道）
   ///
   /// [pollTime] App 本地时钟的轮询时间，用于时间戳比较
@@ -149,6 +158,7 @@ class FarmStore {
     printer.markFresh(Source.http);
 
     onHeartbeat?.call(sn);
+    _dirtySns.add(sn);
     _notify();
   }
 
@@ -181,6 +191,8 @@ class FarmStore {
       ));
     }
 
+    _dirtySns.add(sn);
+    _dirtySns.add(sn);
     _notify();
   }
 
@@ -208,18 +220,21 @@ class FarmStore {
       data: {'previousState': printer.printState?.value},
     ));
 
+    _dirtySns.add(sn);
     _notify();
   }
 
   /// 打印机注册
   void onPrinterRegistered(PrinterInfo info) {
     _printers[info.sn] = FarmPrinterState.fromInfo(info);
+    _dirtySns.add(info.sn);
     _notify();
   }
 
   /// 打印机移除
   void onPrinterRemoved(String sn) {
     _printers.remove(sn);
+    _dirtySns.add(sn);
     _notify();
   }
 
@@ -238,6 +253,7 @@ class FarmStore {
       ));
     }
 
+    _dirtySns.add(sn);
     _notify();
   }
 
@@ -246,6 +262,7 @@ class FarmStore {
     final printer = _printers[sn];
     if (printer != null) {
       updateFn(printer);
+      _dirtySns.add(sn);
       _notify();
     }
   }
