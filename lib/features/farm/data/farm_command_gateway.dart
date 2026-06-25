@@ -74,7 +74,7 @@ class CommandResult {
         method: method,
         success: false,
         error: rpcError['message']?.toString() ?? 'unknown_rpc_error',
-        data: response['result'] as Map<String, dynamic>?,
+        data: _extractData(response['result']),
         duration: duration,
       );
     }
@@ -83,9 +83,17 @@ class CommandResult {
       sn: sn,
       method: method,
       success: true,
-      data: response['result'] as Map<String, dynamic>?,
+      data: _extractData(response['result']),
       duration: duration,
     );
+  }
+
+  /// 安全提取 result，处理 result 为字符串（如 "OK"）或其他非 Map 类型
+  static Map<String, dynamic>? _extractData(dynamic result) {
+    if (result == null) return null;
+    if (result is Map<String, dynamic>) return result;
+    // result 是字符串 "OK" 等非 Map 类型 → 不报错，返回 null
+    return null;
   }
 
   @override

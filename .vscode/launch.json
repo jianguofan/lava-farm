@@ -1,6 +1,39 @@
 {
   "version": "0.2.0",
   "configurations": [
+    // ═══════════════════════════════════════════════
+    // Windows
+    // ═══════════════════════════════════════════════
+    {
+      "name": "lava-farm (Windows debug)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "windows",
+      "flutterMode": "debug",
+      "args": []
+    },
+    {
+      "name": "lava-farm (Windows profile)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "windows",
+      "flutterMode": "profile",
+      "args": []
+    },
+    {
+      "name": "lava-farm (Windows release)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "windows",
+      "flutterMode": "release",
+      "args": []
+    },
+    // ═══════════════════════════════════════════════
+    // macOS
+    // ═══════════════════════════════════════════════
     {
       "name": "lava-farm (macOS debug)",
       "type": "dart",
@@ -28,12 +61,14 @@
       "flutterMode": "release",
       "args": []
     },
+    // ═══════════════════════════════════════════════
+    // 测试
+    // ═══════════════════════════════════════════════
     {
       "name": "Run all tests",
       "type": "dart",
       "request": "launch",
       "program": "test/",
-      "deviceId": "macos",
       "flutterMode": "debug",
       "args": []
     }
