@@ -202,20 +202,29 @@ class FarmPrinterState {
   // ── 派生属性 ──
 
   bool get isOnline => connectionState == FarmConnectionState.online;
-  /// 是否正在打印（综合多种信号源判断）
-  bool get isPrinting =>
-      printState?.value == 'printing' ||
-      isFileActive?.value == true ||
-      (currentFile != null && progress != null && progress!.value > 0 && progress!.value < 1.0);
+
+  /// 是否正在打印（以 printState 为主，其他信号仅作缺失时的 fallback）
+  bool get isPrinting {
+    final state = printState?.value;
+    // 明确非打印状态 → 直接返回 false
+    if (state != null && state != 'printing') return false;
+    // 明确打印中
+    if (state == 'printing') return true;
+    // printState 缺失时，用 isFileActive 辅助判断
+    return isFileActive?.value == true;
+  }
+
   bool get isPaused => printState?.value == 'paused';
 
   /// 是否有打印任务（打印中或暂停中），用于显示打印控制面板
-  bool get hasPrintJob =>
-      isPrinting ||
-      isPaused ||
-      isFileActive?.value == true ||
-      currentFile != null ||
-      fileSize != null;
+  bool get hasPrintJob {
+    if (isPrinting || isPaused) return true;
+    // 只在 printState 缺失时用其他信号
+    if (printState?.value == null) {
+      return isFileActive?.value == true || currentFile != null;
+    }
+    return false;
+  }
   bool get isMqtt => source == Source.mqtt;
   bool get isHttp => source == Source.http;
 
@@ -299,7 +308,24 @@ class FarmPrinterState {
 
     // 打印状态 & 文件
     if (data.containsKey('print_stats.state')) {
-      printState = Staleable(data['print_stats.state'] as String);
+      final newState = data['print_stats.state'] as String;
+      final oldState = printState?.value;
+      printState = Staleable(newState);
+
+      // 打印结束 → 清理残留的打印相关字段，避免 isPrinting 误判
+      if (newState != 'printing' && newState != 'paused') {
+        if (oldState == 'printing' || oldState == 'paused') {
+          progress = null;
+          currentFile = null;
+          isFileActive = null;
+          fileSize = null;
+          filePosition = null;
+          layerNum = null;
+          totalLayers = null;
+          printDuration = null;
+          printMessage = null;
+        }
+      }
     }
     if (data.containsKey('virtual_sdcard.progress')) {
       progress = Staleable((data['virtual_sdcard.progress'] as num).toDouble());

@@ -14,6 +14,7 @@ import 'features/farm/presentation/pages/farm_dashboard_page.dart';
 import 'features/farm/presentation/pages/discovery_wizard_page.dart';
 import 'features/farm/presentation/pages/settings_page.dart';
 import 'features/farm/presentation/pages/batch_print_page.dart';
+import 'features/farm/presentation/pages/log_viewer_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -77,6 +78,10 @@ class LavaFarmApp extends StatelessWidget {
         final initialSns = (settings.arguments as List<String>?) ?? <String>[];
         return MaterialPageRoute(
           builder: (_) => BatchPrintPage(initialSns: initialSns.toSet()),
+        );
+      case '/logs':
+        return MaterialPageRoute(
+          builder: (_) => const LogViewerPage(),
         );
       default:
         // 未匹配路由：回退到 Dashboard

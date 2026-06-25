@@ -116,6 +116,11 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
             onPressed: () => _openBatchPrint(context),
           ),
           IconButton(
+            icon: const Icon(Icons.article_outlined),
+            tooltip: '日志查看',
+            onPressed: () => Navigator.pushNamed(context, '/logs'),
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
             tooltip: '添加打印机',
             onPressed: () => _openDiscovery(context),
