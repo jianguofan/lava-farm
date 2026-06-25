@@ -1,4 +1,4 @@
-/// BatchPrintCoordinator — 群控打印协调器
+/// BatchPrintCoordinator — 群控打印协调器（应用层编排服务）
 ///
 /// 负责多台打印机的"上传 + 启动打印"两阶段 pipeline：
 ///   1. HTTP 上传 3MF/GCode 文件到每台打印机（复用 FileUploader）
@@ -6,15 +6,14 @@
 ///
 /// 每台打印机的 pipeline 独立运行，互不影响。
 /// 上传阶段最多 5 台并发（保守带宽），打印启动阶段无额外限制。
-///
 /// 通过 Stream 向 UI 上报每台打印机的状态变化和总体进度。
 
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'farm_command_gateway.dart';
-import 'file_uploader.dart';
+import '../../data/farm_command_gateway.dart';
+import '../../data/file_uploader.dart';
 
 /// 群控打印中单台打印机的状态
 enum BatchPrintPrinterState {
@@ -70,7 +69,6 @@ class BatchPrintCoordinator {
   final FileUploader _uploader;
   final FarmCommandGateway? _gateway;
 
-  // 内部状态追踪
   final Map<String, BatchPrintPrinterState> _printerStates = {};
   final Map<String, String> _errors = {};
   final Map<String, Duration> _elapsed = {};
@@ -78,15 +76,12 @@ class BatchPrintCoordinator {
   int _uploadDoneCount = 0;
   int _startingPrintCount = 0;
 
-  // 失败打印机 SN 列表（用于重试）
   final List<String> _failedSns = [];
 
-  // 上次执行参数（用于重试）
   Map<String, (String ip, int port, String apiKey)>? _lastConnectionInfo;
   String? _lastFileName;
   Uint8List? _lastFileBytes;
 
-  // Stream 控制器
   final StreamController<BatchPrintPrinterUpdate> _updateController =
       StreamController<BatchPrintPrinterUpdate>.broadcast();
   final StreamController<BatchPrintProgress> _progressController =
@@ -98,32 +93,18 @@ class BatchPrintCoordinator {
   })  : _uploader = uploader ?? FileUploader(),
         _gateway = gateway;
 
-  /// 单台打印机状态更新流
   Stream<BatchPrintPrinterUpdate> get printerUpdateStream =>
       _updateController.stream;
 
-  /// 总体进度流
   Stream<BatchPrintProgress> get progressStream =>
       _progressController.stream;
 
-  /// 当前失败打印机列表（用于 UI 显示重试按钮）
   List<String> get failedSns => List.unmodifiable(_failedSns);
 
-  /// 当前每台打印机的状态快照
   Map<String, BatchPrintPrinterState> get printerStates =>
       Map.unmodifiable(_printerStates);
 
-  // ═══════════════════════════════════════════════════════════
-  // 公共 API
-  // ═══════════════════════════════════════════════════════════
-
   /// 执行群控打印
-  ///
-  /// [printerSns]     选中的打印机 SN 列表
-  /// [connectionInfo] 每台打印机的连接信息 (ip, port, apiKey)
-  /// [localFilePath]  本地文件路径
-  /// [remoteFileName] 远程文件名（如 benchy.3mf）
-  /// [printPlate]     3MF 打印盘 ID（默认 1）
   Future<void> execute({
     required List<String> printerSns,
     required Map<String, (String ip, int port, String apiKey)> connectionInfo,
@@ -135,7 +116,6 @@ class BatchPrintCoordinator {
 
     if (printerSns.isEmpty) return;
 
-    // 1. 读取文件（一次性）
     final file = File(localFilePath);
     if (!await file.exists()) {
       for (final sn in printerSns) {
@@ -148,18 +128,15 @@ class BatchPrintCoordinator {
     final fileBytes = await file.readAsBytes();
     final fileType = _fileType(remoteFileName);
 
-    // 保存参数用于重试
     _lastConnectionInfo = connectionInfo;
     _lastFileName = remoteFileName;
     _lastFileBytes = Uint8List.fromList(fileBytes);
 
-    // 初始化所有打印机状态
     for (final sn in printerSns) {
       _printerStates[sn] = BatchPrintPrinterState.uploading;
     }
     _emitProgress();
 
-    // 2. 并发执行 per-printer pipeline（信号量：最多 5 台同时上传）
     final semaphore = _Semaphore(FileUploader.maxConcurrent);
     final futures = <Future<void>>[];
 
@@ -181,16 +158,13 @@ class BatchPrintCoordinator {
   /// 重试失败的打印机
   Future<void> retryFailed({int printPlate = 1}) async {
     if (_failedSns.isEmpty) return;
-    if (_lastConnectionInfo == null || _lastFileName == null || _lastFileBytes == null) {
-      return;
-    }
+    if (_lastConnectionInfo == null || _lastFileName == null || _lastFileBytes == null) return;
 
     final failedCopy = List<String>.from(_failedSns);
     _failedSns.clear();
 
     final fileType = _fileType(_lastFileName!);
 
-    // 重置失败打印机状态
     for (final sn in failedCopy) {
       _printerStates[sn] = BatchPrintPrinterState.uploading;
       _errors.remove(sn);
@@ -199,7 +173,6 @@ class BatchPrintCoordinator {
     }
     _emitProgress();
 
-    // 重新执行
     final semaphore = _Semaphore(FileUploader.maxConcurrent);
     final futures = <Future<void>>[];
 
@@ -218,7 +191,6 @@ class BatchPrintCoordinator {
     await Future.wait(futures);
   }
 
-  /// 取消所有进行中的操作
   void cancel() {
     _updateController.close();
     _progressController.close();
@@ -228,10 +200,6 @@ class BatchPrintCoordinator {
   void dispose() {
     cancel();
   }
-
-  // ═══════════════════════════════════════════════════════════
-  // Per-Printer Pipeline
-  // ═══════════════════════════════════════════════════════════
 
   Future<void> _runPrinterPipeline({
     required String sn,
@@ -252,7 +220,6 @@ class BatchPrintCoordinator {
 
       final startTime = DateTime.now();
 
-      // ── Phase 1: 上传 ──
       _transition(sn, BatchPrintPrinterState.uploading);
 
       final uploadResult = await _uploader.uploadBytesToPrinter(
@@ -266,15 +233,12 @@ class BatchPrintCoordinator {
 
       if (!uploadResult.success) {
         final err = uploadResult.error ?? '上传失败';
-        print('[BatchPrint] $sn 上传失败: $err (${uploadResult.duration.inMilliseconds}ms)');
         _fail(sn, err);
         return;
       }
 
-      print('[BatchPrint] $sn 上传完成 (${uploadResult.duration.inMilliseconds}ms)');
       _transition(sn, BatchPrintPrinterState.uploadDone);
 
-      // ── Phase 2: 启动打印 ──
       final gateway = _gateway;
       if (gateway == null) {
         _fail(sn, 'MQTT 未连接，无法启动打印');
@@ -294,18 +258,10 @@ class BatchPrintCoordinator {
       );
 
       if (printResult.success) {
-        _transition(
-          sn,
-          BatchPrintPrinterState.success,
-          elapsed: DateTime.now().difference(startTime),
-        );
+        _transition(sn, BatchPrintPrinterState.success,
+            elapsed: DateTime.now().difference(startTime));
       } else {
-        final errMsg = printResult.error ?? 'unknown';
-        print('[BatchPrint] $sn 打印启动失败: $errMsg (method=$fileType path=$fileName plate=$printPlate)');
-        if (printResult.data != null) {
-          print('[BatchPrint] $sn response data: ${printResult.data}');
-        }
-        _fail(sn, errMsg);
+        _fail(sn, printResult.error ?? 'unknown');
       }
     } catch (e) {
       _fail(sn, e.toString());
@@ -314,55 +270,29 @@ class BatchPrintCoordinator {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // 内部状态管理
-  // ═══════════════════════════════════════════════════════════
-
-  void _transition(
-    String sn,
-    BatchPrintPrinterState state, {
-    Duration? elapsed,
-  }) {
+  void _transition(String sn, BatchPrintPrinterState state, {Duration? elapsed}) {
     _printerStates[sn] = state;
     if (elapsed != null) _elapsed[sn] = elapsed;
 
-    // 更新计数器
     switch (state) {
-      case BatchPrintPrinterState.uploading:
-        _uploadingCount++;
-        break;
-      case BatchPrintPrinterState.uploadDone:
-        _uploadingCount--;
-        _uploadDoneCount++;
-        break;
-      case BatchPrintPrinterState.startingPrint:
-        _uploadDoneCount--;
-        _startingPrintCount++;
-        break;
-      case BatchPrintPrinterState.success:
-        _startingPrintCount--;
-        break;
-      default:
-        break;
+      case BatchPrintPrinterState.uploading:   _uploadingCount++; break;
+      case BatchPrintPrinterState.uploadDone:   _uploadingCount--; _uploadDoneCount++; break;
+      case BatchPrintPrinterState.startingPrint: _uploadDoneCount--; _startingPrintCount++; break;
+      case BatchPrintPrinterState.success:      _startingPrintCount--; break;
+      default: break;
     }
 
-    _updateUI(BatchPrintPrinterUpdate(
-      sn: sn,
-      state: state,
-      elapsed: elapsed,
-    ));
+    _updateUI(BatchPrintPrinterUpdate(sn: sn, state: state, elapsed: elapsed));
     _emitProgress();
   }
 
   void _fail(String sn, String error) {
-    // 回退计数器（如果之前在某个进行中状态）
     final prev = _printerStates[sn];
     if (prev == BatchPrintPrinterState.uploading) _uploadingCount--;
     if (prev == BatchPrintPrinterState.uploadDone) _uploadDoneCount--;
     if (prev == BatchPrintPrinterState.startingPrint) _startingPrintCount--;
 
-    final failState = prev == BatchPrintPrinterState.uploading ||
-            prev == null
+    final failState = prev == BatchPrintPrinterState.uploading || prev == null
         ? BatchPrintPrinterState.uploadFailed
         : BatchPrintPrinterState.printFailed;
 
@@ -370,18 +300,12 @@ class BatchPrintCoordinator {
     _errors[sn] = error;
     _failedSns.add(sn);
 
-    _updateUI(BatchPrintPrinterUpdate(
-      sn: sn,
-      state: failState,
-      error: error,
-    ));
+    _updateUI(BatchPrintPrinterUpdate(sn: sn, state: failState, error: error));
     _emitProgress();
   }
 
   void _updateUI(BatchPrintPrinterUpdate update) {
-    if (!_updateController.isClosed) {
-      _updateController.add(update);
-    }
+    if (!_updateController.isClosed) _updateController.add(update);
   }
 
   void _emitProgress() {
@@ -396,9 +320,7 @@ class BatchPrintCoordinator {
     for (final state in _printerStates.values) {
       if (state == BatchPrintPrinterState.success) successCount++;
       if (state == BatchPrintPrinterState.uploadFailed ||
-          state == BatchPrintPrinterState.printFailed) {
-        failedCount++;
-      }
+          state == BatchPrintPrinterState.printFailed) failedCount++;
     }
 
     _progressController.add(BatchPrintProgress(
@@ -421,11 +343,6 @@ class BatchPrintCoordinator {
     _failedSns.clear();
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // 辅助
-  // ═══════════════════════════════════════════════════════════
-
-  /// 判断文件类型（与服务端保持一致）
   static String _fileType(String fileName) {
     final lower = fileName.toLowerCase();
     if (lower.endsWith('.3mf')) return '3mf';
@@ -434,7 +351,7 @@ class BatchPrintCoordinator {
   }
 }
 
-/// 内部信号量（与 FileUploader._Semaphore 相同实现）
+/// 内部信号量
 class _Semaphore {
   int _permits;
   final List<Completer<void>> _waiters = [];

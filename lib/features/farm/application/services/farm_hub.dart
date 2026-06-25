@@ -1,47 +1,23 @@
-/// FarmHub — 群控系统入口 (T3.2)
+/// FarmHub — 群控系统入口（应用层编排服务）
 ///
 /// 一站式生命周期管理:
 ///   start()     → 连接 Broker → 加载注册表 → 启动监控
 ///   discover()  → 扫描局域网打印机
 ///   onboard()   → 单台打印机入网（验证 → 配置推送 → 注册）
 ///   shutdown()  → 停止监控 → 断开 Broker → 持久化
+///
+/// 依赖 FarmRepository 接口（领域层抽象），不直接依赖具体数据源。
 
 import 'dart:async';
 
-import 'broker_connection_manager.dart';
-import 'config_push_service.dart';
-import 'credential_store.dart';
-import 'farm_connection_monitor.dart';
-import 'farm_store.dart';
-import 'printer_discovery.dart';
-import 'printer_info.dart';
-
-/// 入网结果
-class OnboardingResult {
-  final bool success;
-  final String? sn;
-  final Source? source;
-  final String? error;
-
-  const OnboardingResult._({
-    required this.success,
-    this.sn,
-    this.source,
-    this.error,
-  });
-
-  factory OnboardingResult.success({required String sn, required Source source}) =>
-      OnboardingResult._(success: true, sn: sn, source: source);
-
-  factory OnboardingResult.authFailed() =>
-      OnboardingResult._(success: false, error: 'Access Code 验证失败');
-
-  factory OnboardingResult.pushFailed(String reason) =>
-      OnboardingResult._(success: false, error: reason);
-
-  factory OnboardingResult.printingBlocked(String sn) =>
-      OnboardingResult._(success: false, sn: sn, error: '打印机正在打印中，操作被用户取消');
-}
+import '../../data/broker_connection_manager.dart';
+import '../../data/config_push_service.dart';
+import '../../data/credential_store.dart';
+import '../../data/farm_connection_monitor.dart';
+import '../../data/farm_store.dart';
+import '../../data/printer_discovery.dart';
+import '../../data/printer_info.dart';
+import '../../domain/repositories/farm_repository.dart';
 
 /// FarmHub — 群控系统总入口
 class FarmHub {
@@ -53,7 +29,7 @@ class FarmHub {
   // 运行时组件（start 后初始化）
   FarmConnectionMonitor? connectionMonitor;
   BrokerHealthMonitor? brokerHealthMonitor;
-  Timer? _upgradeTimer; // HTTP 降级后台升级重试
+  Timer? _upgradeTimer;
 
   /// 当前 Broker 连接配置
   BrokerConfig? _brokerConfig;
@@ -72,10 +48,6 @@ class FarmHub {
   // ═══════════════════════════════════════════════════════════
 
   /// 启动群控系统
-  ///
-  /// 1. 连接 Broker（外部或内嵌）
-  /// 2. 加载已注册打印机
-  /// 3. 启动监控
   Future<void> start({required BrokerConfig brokerConfig}) async {
     _brokerConfig = brokerConfig;
 
@@ -87,28 +59,21 @@ class FarmHub {
       password: brokerConfig.password,
     );
 
-    // 2. 加载已注册打印机（从 Hive）
-    // final saved = await PrinterRegistry.loadAll();
-    // store.loadFromRegistry(saved);
-
-    // 3. 启动连接监控（被动心跳 — 靠 MQTT 消息流驱动）
+    // 2. 启动连接监控（被动心跳 — 靠 MQTT 消息流驱动）
     connectionMonitor = FarmConnectionMonitor(
       onForceOffline: (sn, reason) => store.forceOffline(sn, reason),
     );
     store.onHeartbeat = (sn) => connectionMonitor!.heartbeat(sn);
     connectionMonitor!.start();
 
-    // 4. 启动 Broker 健康监控
+    // 3. 启动 Broker 健康监控
     brokerHealthMonitor = BrokerHealthMonitor(
       pingFn: () => brokerConnMgr.ping(),
-      onUnhealthy: () {
-        // Broker 假活 → 触发重连
-        // brokerConnMgr.disconnect() 后会自动重连
-      },
+      onUnhealthy: () {},
     );
     brokerHealthMonitor!.start();
 
-    // 5. 启动 HTTP 降级后台升级（每 5min 重试推送 MQTT 配置）
+    // 4. 启动 HTTP 降级后台升级（每 5min 重试推送 MQTT 配置）
     _startUpgradeRetries();
   }
 
@@ -118,9 +83,6 @@ class FarmHub {
     connectionMonitor?.stop();
     brokerHealthMonitor?.stop();
     await brokerConnMgr.disconnect();
-
-    // 持久化
-    // await PrinterRegistry.save(store.exportToRegistry());
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -143,15 +105,6 @@ class FarmHub {
   // ═══════════════════════════════════════════════════════════
 
   /// 单台打印机入网
-  ///
-  /// 完整流程:
-  ///   1. 验证 Access Code
-  ///   2. 获取设备信息
-  ///   3. 检查打印机状态（打印中则警告）
-  ///   4. 生成 MQTT 凭据
-  ///   5. 推送配置到打印机
-  ///   6. 等待 MQTT 上线
-  ///   7. 注册到 FarmStore + 持久化
   Future<OnboardingResult> onboard({
     required String ip,
     required int port,
@@ -177,7 +130,6 @@ class FarmHub {
 
       // Step 3: 打印中状态检查
       if (info.isPrinting) {
-        // 返回特殊结果，由 UI 弹窗确认
         return OnboardingResult.printingBlocked(sn);
       }
 
@@ -201,7 +153,6 @@ class FarmHub {
       final result = await configPusher.onboard(
         accessCode: accessCode,
         mqttConfig: mqttConfig,
-        // waitForMqttOnline 由 FarmMqttRouter 提供（Phase 5）
       );
 
       // Step 6: 注册到系统
@@ -214,9 +165,6 @@ class FarmHub {
         firmwareVersion: info.version,
         apiKey: token,
       ));
-
-      // Step 7: 持久化
-      // await PrinterRegistry.save(store.exportToRegistry());
 
       return OnboardingResult.success(sn: sn, source: result.resultingSource);
 
@@ -231,21 +179,18 @@ class FarmHub {
   void removePrinter(String sn) {
     store.onPrinterRemoved(sn);
     connectionMonitor?.remove(sn);
-    // await PrinterRegistry.save(store.exportToRegistry());
   }
 
   // ═══════════════════════════════════════════════════════════
   // HTTP 降级后台升级
   // ═══════════════════════════════════════════════════════════
 
-  /// 后台周期性重试 HTTP 降级的打印机，尝试升级到 MQTT
   void _startUpgradeRetries() {
     _upgradeTimer?.cancel();
     _upgradeTimer = Timer.periodic(const Duration(minutes: 5), (_) async {
       final httpPrinters = store.httpFallbackPrinters;
       for (final printer in httpPrinters) {
         try {
-          // 重新尝试推送 MQTT 配置
           final configPusher = ConfigPushService(
             printerIp: printer.ip,
             printerPort: printer.port,
@@ -260,14 +205,12 @@ class FarmHub {
             instanceName: printer.sn,
           );
 
-          // 使用空字符串作为 apiKey（打印机已入网，无需再次验证）
           final result = await configPusher.onboard(
             accessCode: '',
             mqttConfig: mqttConfig,
           );
 
           if (result.success) {
-            // 升级成功！标记为 MQTT 来源
             store.onPrinterRegistered(PrinterInfo(
               sn: printer.sn,
               ip: printer.ip,
@@ -280,9 +223,7 @@ class FarmHub {
           }
 
           configPusher.dispose();
-        } catch (_) {
-          // 单台失败不阻塞，下次重试
-        }
+        } catch (_) {}
       }
     });
   }

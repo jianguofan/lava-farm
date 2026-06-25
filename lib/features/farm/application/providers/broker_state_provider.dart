@@ -1,57 +1,60 @@
-/// Broker 连接状态 + FarmStore + MqttRouter Providers
+/// 核心 Providers: FarmStore、Broker、MQTT Router、Command Gateway
 ///
-/// App 是纯 MQTT 客户端。Broker 健康由 MQTT keepalive + PINGREQ/PINGRESP 检测，
-/// BrokerConnectionManager 负责自动重连（指数退避）。
-///
-/// Riverpod Provider 层次:
-///   farmStoreProvider            ── 核心状态 Store（单例）
-///   mqttTransportFactory         ── MqttTransportAdapter 工厂
-///   brokerConnMgrProvider        ── BrokerConnectionManager（注入 factory）
-///   brokerStateProvider          ── Stream<BrokerConnState>（UI 绑定）
+/// Provider 层次:
+///   farmStoreProvider            ── 核心状态 Store（单例）+ 版本号驱动 UI
+///   farmStoreVersionProvider     ── 版本号（UI watch 此值触发重建）
+///   mqttTransportFactoryProvider ── MqttTransportAdapter 工厂
+///   brokerConnMgrProvider        ── BrokerConnectionManager
+///   brokerStateProvider          ── Stream<BrokerConnState>
 ///   farmMqttRouterProvider       ── FarmMqttRouter（自动 start/stop）
-///   farmCommandGatewayProvider   ── FarmCommandGateway（从 Router 提取）
-///   cameraServiceProvider        ── CameraService（MQTT 发命令 + HTTP 轮询帧）
+///   farmCommandGatewayProvider   ── FarmCommandGateway
+///   cameraServiceProvider        ── CameraService
+///   farmHubProvider              ── FarmHub（群控总入口）
+///   batchPrintCoordinatorProvider── BatchPrintCoordinator
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../data/batch_print_coordinator.dart';
+import '../services/batch_print_coordinator.dart';
 import '../../data/broker_connection_manager.dart';
 import '../../data/farm_logger.dart';
 import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
 import '../../data/camera_service.dart';
-import '../../data/farm_hub.dart';
+import '../services/farm_hub.dart';
 import '../../data/farm_store.dart';
 import '../../data/mqtt_transport_impl.dart';
 import '../../data/printer_discovery.dart';
 import '../../data/unified_request_tracker.dart';
 import 'credential_store_provider.dart';
-import 'printer_list_provider.dart';
 
-/// MQTT Transport 工厂
+// ═══════════════════════════════════════════════════════════
+// MQTT Transport
+// ═══════════════════════════════════════════════════════════
+
 final mqttTransportFactoryProvider =
     Provider<Future<MqttTransportAdapter> Function(BrokerConfig config)>((ref) {
   final factory = MqttTransportFactory();
   return (config) => factory.create(config);
 });
 
-/// FarmStore — 多设备状态聚合（单例）
+// ═══════════════════════════════════════════════════════════
+// FarmStore — 唯一状态存储（单例）
+// ═══════════════════════════════════════════════════════════
+
+/// FarmStore 实例 Provider（长生命周期单例）
 final farmStoreProvider = Provider<FarmStore>((ref) {
   final store = FarmStore();
 
-  // 桥接: FarmStore 变更 → 仅更新脏 SN 的打印机（避免遍历全部）
-  store.addListener(() {
-    final notifier = ref.read(printerRegistryProvider.notifier);
-    final dirtySns = store.dirtySns;
-    for (final sn in dirtySns) {
-      final printer = store.getPrinter(sn);
-      if (printer != null) {
-        notifier.addPrinter(printer);
-      }
+  // FarmStore 变更 → 触发 farmStoreVersionProvider 自增，驱动 UI 重建
+  store.onVersionChanged = () {
+    // 安全读取：Provider 销毁后不更新
+    try {
+      ref.read(farmStoreVersionProvider.notifier).state++;
+    } catch (_) {
+      // Provider 已被 dispose，忽略
     }
-    store.clearDirtySns();
-  });
+  };
 
   ref.onDispose(() {
     store.dispose();
@@ -61,7 +64,20 @@ final farmStoreProvider = Provider<FarmStore>((ref) {
   return store;
 });
 
-/// BrokerConnectionManager 单例 Provider
+/// 版本号 Provider — UI 通过 watch 此值感知 FarmStore 变更
+///
+/// 使用方式:
+/// ```dart
+/// // 派生 Provider 中
+/// ref.watch(farmStoreVersionProvider);        // 感知任何打印机变化
+/// final store = ref.read(farmStoreProvider);  // 读取具体数据
+/// ```
+final farmStoreVersionProvider = StateProvider<int>((ref) => 0);
+
+// ═══════════════════════════════════════════════════════════
+// Broker 连接
+// ═══════════════════════════════════════════════════════════
+
 final brokerConnMgrProvider = Provider<BrokerConnectionManager>((ref) {
   final credentialStore = ref.watch(credentialStoreProvider);
   final mqttFactory = ref.watch(mqttTransportFactoryProvider);
@@ -71,14 +87,26 @@ final brokerConnMgrProvider = Provider<BrokerConnectionManager>((ref) {
   );
 });
 
-/// 活跃的 Router 实例缓存（避免重复创建）
-/// 使用模块级变量而非 StateProvider — 避免 Provider build 期间修改其他 Provider 违反 Riverpod 规则
+final brokerStateProvider = StreamProvider<BrokerConnState>((ref) {
+  final manager = ref.watch(brokerConnMgrProvider);
+  return manager.stateStream;
+});
+
+final isBrokerConnectedProvider = Provider<bool>((ref) {
+  final state = ref.watch(brokerStateProvider).valueOrNull;
+  return state?.isConnected ?? false;
+});
+
+// ═══════════════════════════════════════════════════════════
+// MQTT Router（自动 start/stop）
+// ═══════════════════════════════════════════════════════════
+
+/// 活跃 Router 缓存（Provider 重建时复用同一实例，避免重复创建）
+/// 模块级变量是此处正确的选择：
+///   - Provider.create 内不能修改其他 Provider 的状态
+///   - Router 生命周期与 Broker 连接生命周期一致（单例语义）
 FarmMqttRouter? _activeRouter;
 
-/// FarmMqttRouter — 连接后自动创建、start、订阅通配符 topic
-///
-/// 依赖 brokerStateProvider（Stream）感知连接/断开变化。
-/// 连接建立时自动 start() + startProbing()，断开时自动 stop()。
 final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
   final brokerState = ref.watch(brokerStateProvider).valueOrNull;
   final isConnected = brokerState?.isConnected ?? false;
@@ -89,7 +117,7 @@ final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
   // 未连接或无 transport → 清理旧 Router
   if (!isConnected || transport == null) {
     if (_activeRouter != null) {
-      _activeRouter!.stop(); // fire-and-forget
+      _activeRouter!.stop();
       _activeRouter = null;
     }
     return null;
@@ -98,8 +126,8 @@ final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
   // 已有活跃 Router → 复用
   if (_activeRouter != null) return _activeRouter;
 
-  // 创建新 Router 并自动启动
-  final store = ref.watch(farmStoreProvider);
+  // 创建新 Router
+  final store = ref.read(farmStoreProvider);
   final router = FarmMqttRouter(store: store, transport: transport);
   _activeRouter = router;
 
@@ -117,31 +145,24 @@ final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
   return router;
 });
 
-/// UnifiedRequestTracker — 从 Router 提取，供 BatchOperator 等使用
+// ═══════════════════════════════════════════════════════════
+// 命令网关 & 请求追踪
+// ═══════════════════════════════════════════════════════════
+
 final unifiedTrackerProvider = Provider<UnifiedRequestTracker?>((ref) {
   final router = ref.watch(farmMqttRouterProvider);
   return router?.tracker;
 });
 
-/// FarmCommandGateway — 从 Router 提取，供 BatchOperator 等使用
 final farmCommandGatewayProvider = Provider<FarmCommandGateway?>((ref) {
   final router = ref.watch(farmMqttRouterProvider);
   return router?.gateway;
 });
 
-/// Broker 连接状态流 Provider
-final brokerStateProvider = StreamProvider<BrokerConnState>((ref) {
-  final manager = ref.watch(brokerConnMgrProvider);
-  return manager.stateStream;
-});
+// ═══════════════════════════════════════════════════════════
+// Broker 健康监控
+// ═══════════════════════════════════════════════════════════
 
-/// 便捷：是否已连接
-final isBrokerConnectedProvider = Provider<bool>((ref) {
-  final state = ref.watch(brokerStateProvider).valueOrNull;
-  return state?.isConnected ?? false;
-});
-
-/// BrokerHealthMonitor Provider
 final brokerHealthMonitorProvider = Provider<BrokerHealthMonitor>((ref) {
   final manager = ref.watch(brokerConnMgrProvider);
   return BrokerHealthMonitor(
@@ -151,7 +172,6 @@ final brokerHealthMonitorProvider = Provider<BrokerHealthMonitor>((ref) {
   );
 });
 
-/// Broker 健康状态 Provider
 final brokerHealthStateProvider = Provider<BrokerHealthState>((ref) {
   final monitor = ref.watch(brokerHealthMonitorProvider);
   final failures = monitor.consecutiveFailures;
@@ -160,17 +180,26 @@ final brokerHealthStateProvider = Provider<BrokerHealthState>((ref) {
   return BrokerHealthState.healthy;
 });
 
-/// HTTP 降级打印机数量
+// ═══════════════════════════════════════════════════════════
+// HTTP 降级计数
+// ═══════════════════════════════════════════════════════════
+
 final httpFallbackCountProvider = StateProvider<int>((ref) => 0);
 
-/// CameraService Provider — MQTT 发命令 + HTTP 轮询帧画面
+// ═══════════════════════════════════════════════════════════
+// Camera Service
+// ═══════════════════════════════════════════════════════════
+
 final cameraServiceProvider = Provider<CameraService?>((ref) {
   final router = ref.watch(farmMqttRouterProvider);
   if (router == null) return null;
   return CameraService(router: router);
 });
 
-/// FarmHub Provider — 群控总入口（入网/发现/生命周期）
+// ═══════════════════════════════════════════════════════════
+// FarmHub — 群控总入口
+// ═══════════════════════════════════════════════════════════
+
 final farmHubProvider = Provider<FarmHub>((ref) {
   final store = ref.watch(farmStoreProvider);
   final brokerConnMgr = ref.watch(brokerConnMgrProvider);
@@ -183,9 +212,10 @@ final farmHubProvider = Provider<FarmHub>((ref) {
   );
 });
 
-/// BatchPrintCoordinator Provider — 群控打印协调器
-///
-/// 注入 FileUploader + FarmCommandGateway，提供多台并发上传+打印能力。
+// ═══════════════════════════════════════════════════════════
+// BatchPrintCoordinator
+// ═══════════════════════════════════════════════════════════
+
 final batchPrintCoordinatorProvider = Provider<BatchPrintCoordinator>((ref) {
   final gateway = ref.watch(farmCommandGatewayProvider);
   return BatchPrintCoordinator(gateway: gateway);

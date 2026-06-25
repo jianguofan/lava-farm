@@ -46,6 +46,13 @@ class FarmMqttRouter {
   /// 元数据刷新间隔（心跳由 FarmConnectionMonitor 通过 +/status 流驱动）
   static const _probeInterval = Duration(minutes: 10);
 
+  /// IP 解析定时器 — 对在线但无有效 IP 的打印机定期重试
+  Timer? _ipResolveTimer;
+  static const _ipResolveInterval = Duration(seconds: 30);
+
+  /// 已订阅对象推送的打印机（防止重复 subscribe 导致消息多发）
+  final Set<String> _subscribedSns = {};
+
   /// 防重入：start() 只能调用一次
   bool _started = false;
 
@@ -111,6 +118,11 @@ class FarmMqttRouter {
     _probeTimer?.cancel();
     _probeAll();
     _probeTimer = Timer.periodic(_probeInterval, (_) => _probeAll());
+
+    // 启动 IP 解析定时器：每 30s 对在线但无有效 IP 的打印机重试
+    _ipResolveTimer?.cancel();
+    _resolveIpsForUnknownDevices();
+    _ipResolveTimer = Timer.periodic(_ipResolveInterval, (_) => _resolveIpsForUnknownDevices());
   }
 
   /// 停止路由
@@ -118,11 +130,14 @@ class FarmMqttRouter {
     _started = false;
     _probeTimer?.cancel();
     _probeTimer = null;
+    _ipResolveTimer?.cancel();
+    _ipResolveTimer = null;
     _messageSub?.cancel();
     _messageSub = null;
     _processor.dispose();
     _tracker.cancelAll();
     _seenTopics.clear();
+    _subscribedSns.clear();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -311,7 +326,11 @@ class FarmMqttRouter {
   }
 
   /// 向设备发送 printer.objects.subscribe，激活指定对象的状态推送
+  ///
+  /// ⚠️ 防重入：同一 SN 只订阅一次，避免打印机累积多个订阅导致消息重复发送
   Future<void> _subscribeDeviceObjects(String sn) async {
+    if (_subscribedSns.contains(sn)) return;
+    _subscribedSns.add(sn);
     try {
       await sendCommand(sn, 'printer.objects.subscribe', {
         'objects': {
@@ -451,6 +470,22 @@ class FarmMqttRouter {
     final printer = _store.getPrinter(msg.sn);
     if (printer != null && printer.ip == 'MQTT') {
       _resolveIpInBackground(msg.sn);
+    }
+  }
+
+  /// 定期对在线但无有效 IP 的打印机重试 IP 解析
+  ///
+  /// 目标：MQTT 自动发现的设备初始没有 IP，需要在打印机上线后
+  /// 持续重试获取直到成功。
+  void _resolveIpsForUnknownDevices() {
+    for (final printer in _store.allPrinters) {
+      final sn = printer.sn;
+      // 只处理：在线 + 无有效 IP（'MQTT' 或 '—'）+ 未在解析中
+      if (!printer.isOnline) continue;
+      if (printer.ip != 'MQTT' && printer.ip != '—') continue;
+      if (_resolvingSns.contains(sn)) continue;
+
+      _resolveIpInBackground(sn);
     }
   }
 

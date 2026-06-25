@@ -18,9 +18,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
-import '../../data/batch_print_coordinator.dart';
+import '../../application/services/batch_print_coordinator.dart';
 import '../../data/farm_printer_state.dart';
-import '../widgets/printer_card.dart';
 
 /// 群控打印页面
 class BatchPrintPage extends ConsumerStatefulWidget {
@@ -70,11 +69,16 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     final printers = ref.watch(printerListProvider);
     final gateway = ref.watch(farmCommandGatewayProvider);
 
-    // 筛选可用打印机
-    final onlinePrinters =
-        printers.where((p) => p.isOnline && p.ip != '—').toList();
-    final offlinePrinters =
-        printers.where((p) => !p.isOnline || p.ip == '—').toList();
+    // 筛选可用打印机（在线 + 有 IP 才可选）
+    final readyPrinters = printers
+        .where((p) => p.isOnline && p.ip != '—' && p.ip != 'MQTT')
+        .toList();
+    // MQTT 在线但 IP 待解析（显示但不给选）
+    final pendingPrinters = printers
+        .where((p) => p.isOnline && (p.ip == '—' || p.ip == 'MQTT'))
+        .toList();
+    // 离线
+    final offlinePrinters = printers.where((p) => !p.isOnline).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -96,7 +100,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           const Divider(height: 1),
 
           // ── 打印机选择 ──
-          _buildPrinterSection(onlinePrinters, offlinePrinters),
+          _buildPrinterSection(readyPrinters, pendingPrinters, offlinePrinters),
 
           const Divider(height: 1),
 
@@ -106,7 +110,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           const Divider(height: 1),
 
           // ── 操作按钮 ──
-          _buildActionButton(gateway != null, onlinePrinters),
+          _buildActionButton(gateway != null, readyPrinters),
 
           // ── 进度显示 ──
           if (_isExecuting || _isDone) Expanded(child: _buildProgressSection()),
@@ -158,7 +162,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   // ═══════════════════════════════════════════════════════════
 
   Widget _buildPrinterSection(
-    List<FarmPrinterState> onlinePrinters,
+    List<FarmPrinterState> readyPrinters,
+    List<FarmPrinterState> pendingPrinters,
     List<FarmPrinterState> offlinePrinters,
   ) {
     return Padding(
@@ -172,15 +177,15 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
               const Icon(Icons.print_outlined, size: 20),
               const SizedBox(width: 8),
               Text(
-                '选择打印机  ${_selectedSns.length}/${onlinePrinters.length} 台在线',
+                '选择打印机  ${_selectedSns.length}/${readyPrinters.length + pendingPrinters.length} 台在线',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const Spacer(),
               if (!_isExecuting) ...[
                 _QuickAction(
-                  label: '全选在线',
+                  label: '全选就绪',
                   onTap: () => setState(() {
-                    for (final p in onlinePrinters) {
+                    for (final p in readyPrinters) {
                       _selectedSns.add(p.sn);
                     }
                   }),
@@ -196,8 +201,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
           const SizedBox(height: 12),
 
-          // 打印机网格
-          if (onlinePrinters.isEmpty)
+          // 就绪打印机网格
+          if (readyPrinters.isEmpty && pendingPrinters.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 24),
               child: Center(
@@ -212,25 +217,83 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
               height: 180,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
-                itemCount: onlinePrinters.length,
+                itemCount: readyPrinters.length + pendingPrinters.length,
                 separatorBuilder: (_, __) => const SizedBox(width: 8),
                 itemBuilder: (context, index) {
-                  final printer = onlinePrinters[index];
-                  final isSelected = _selectedSns.contains(printer.sn);
-                  return _buildSelectablePrinterCard(printer, isSelected);
+                  if (index < readyPrinters.length) {
+                    final printer = readyPrinters[index];
+                    final isSelected = _selectedSns.contains(printer.sn);
+                    return _buildSelectablePrinterCard(printer, isSelected);
+                  } else {
+                    final printer = pendingPrinters[index - readyPrinters.length];
+                    return _buildPendingPrinterCard(printer);
+                  }
                 },
               ),
             ),
 
-          // 离线打印机（折叠显示）
+          // 离线打印机
           if (offlinePrinters.isNotEmpty) ...[
             const SizedBox(height: 8),
             Text(
-              '${offlinePrinters.length} 台离线 / 不可用',
+              '${offlinePrinters.length} 台离线',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  /// IP 待解析的打印机（在线但无 IP，不可选）
+  Widget _buildPendingPrinterCard(FarmPrinterState printer) {
+    return SizedBox(
+      width: 150,
+      child: Card(
+        elevation: 1,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: Colors.orange.shade200),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.hourglass_empty, size: 16, color: Colors.orange.shade600),
+                  const SizedBox(width: 6),
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.green,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      printer.displayName ?? printer.sn,
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(printer.sn,
+                  style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+                  overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 2),
+              Text('IP 解析中...',
+                  style: TextStyle(fontSize: 9, color: Colors.orange.shade600)),
+              const Spacer(),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -678,14 +741,14 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     if (_filePath == null || _selectedSns.isEmpty) return;
 
     // 构建连接信息
-    final registry = ref.read(printerRegistryProvider);
+    final store = ref.read(farmStoreProvider);
     final connectionInfo = <String, (String ip, int port, String apiKey)>{};
 
     final validSns = <String>[];
     for (final sn in _selectedSns) {
-      final printer = registry[sn];
+      final printer = store.getPrinter(sn);
       if (printer == null) continue;
-      if (printer.ip == '—' || !printer.isOnline) {
+      if (printer.ip == '—' || printer.ip == 'MQTT' || !printer.isOnline) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(

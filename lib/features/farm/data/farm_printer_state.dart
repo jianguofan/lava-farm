@@ -249,6 +249,10 @@ class FarmPrinterState {
       if (!eventTime.isAfter(lastDataTimestamp!)) return false;
     }
 
+    // 过滤 null 值：MQTT 消息中 JSON null 字段无遥测意义，
+    // 且会导致下方 data[key] as String/num 类型转换崩溃。
+    data.removeWhere((_, v) => v == null);
+
     // 值去重：如果所有字段值与已有快照相同，跳过
     if (rawStateSnapshot != null) {
       bool anyChanged = false;

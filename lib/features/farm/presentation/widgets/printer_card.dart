@@ -12,7 +12,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../application/providers/printer_list_provider.dart';
+import '../../application/providers/broker_state_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/printer_info.dart';
 
@@ -40,10 +40,10 @@ class PrinterCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 使用 select() 精确重建——仅该打印机变化时才重建此 Card
-    final printer = ref.watch(
-      printerRegistryProvider.select((state) => state[sn]),
-    );
+    // 监听版本号 + 从 FarmStore 读取该打印机状态
+    // 100ms 批处理确保最多 10 次/秒重建
+    ref.watch(farmStoreVersionProvider);
+    final printer = ref.read(farmStoreProvider).getPrinter(sn);
 
     if (printer == null) {
       return const SizedBox.shrink();

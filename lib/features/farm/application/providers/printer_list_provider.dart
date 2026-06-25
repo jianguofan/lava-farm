@@ -1,60 +1,39 @@
-/// 打印机列表 Providers (T4.3)
+/// 打印机列表 Providers
 ///
-/// 从 FarmStore 派生各种视图: 全部/打印中/离线/HTTP降级/统计
-/// 使用 FarmPrinterState（farm_printer_state.dart）作为统一状态模型。
+/// 从 FarmStore 派生各种视图: 全部/打印中/离线/HTTP降级/统计。
+/// 通过 farmStoreVersionProvider 感知变化，无需中间 StateNotifier。
+///
+/// 设计原则:
+///   - 唯一数据源: farmStoreProvider (FarmStore 实例)
+///   - 变更通知: farmStoreVersionProvider (int 版本号)
+///   - 派生视图: 以下所有 Provider 都是纯派生，无独立状态
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/farm_printer_state.dart';
+import 'broker_state_provider.dart';
 
 // ═══════════════════════════════════════════════════════════
-// 核心 Store
+// 基础: 监听版本号 → 读取全部打印机
 // ═══════════════════════════════════════════════════════════
-
-/// 打印机注册表 — 持有 Map<SN, FarmPrinterState>
-class PrinterRegistryNotifier
-    extends StateNotifier<Map<String, FarmPrinterState>> {
-  PrinterRegistryNotifier() : super({});
-
-  void addPrinter(FarmPrinterState printer) {
-    state = {...state, printer.sn: printer};
-  }
-
-  void removePrinter(String sn) {
-    state = Map.from(state)..remove(sn);
-  }
-
-  void updatePrinter(
-    String sn,
-    FarmPrinterState Function(FarmPrinterState) updateFn,
-  ) {
-    final current = state[sn];
-    if (current == null) return;
-    state = {...state, sn: updateFn(current)};
-  }
-
-  FarmPrinterState? getPrinter(String sn) => state[sn];
-  List<FarmPrinterState> get allPrinters => state.values.toList();
-}
-
-// ═══════════════════════════════════════════════════════════
-// Providers
-// ═══════════════════════════════════════════════════════════
-
-/// 打印机注册表 Provider
-final printerRegistryProvider =
-    StateNotifierProvider<PrinterRegistryNotifier,
-        Map<String, FarmPrinterState>>((ref) {
-  return PrinterRegistryNotifier();
-});
 
 /// 全部打印机列表（按 SN 排序）
+///
+/// 这是所有派生 Provider 的基础。
+/// 每次 FarmStore 变更（版本号递增）都会触发重建。
 final printerListProvider = Provider<List<FarmPrinterState>>((ref) {
-  final registry = ref.watch(printerRegistryProvider);
-  final printers = registry.values.toList();
+  // 监听版本号 → FarmStore 每次批处理通知后触发此 Provider 重建
+  ref.watch(farmStoreVersionProvider);
+  // 读取最新数据
+  final store = ref.read(farmStoreProvider);
+  final printers = store.allPrinters.toList();
   printers.sort((a, b) => a.sn.compareTo(b.sn));
   return printers;
 });
+
+// ═══════════════════════════════════════════════════════════
+// 派生: 按状态筛选
+// ═══════════════════════════════════════════════════════════
 
 /// 打印中的打印机
 final printingPrintersProvider = Provider<List<FarmPrinterState>>((ref) {
@@ -71,7 +50,17 @@ final httpFallbackPrintersProvider = Provider<List<FarmPrinterState>>((ref) {
   return ref.watch(printerListProvider).where((p) => p.isHttp).toList();
 });
 
-/// 农场统计数据
+/// 在线且 MQTT 通道的打印机
+final mqttOnlinePrintersProvider = Provider<List<FarmPrinterState>>((ref) {
+  return ref.watch(printerListProvider)
+      .where((p) => p.isOnline && p.isMqtt)
+      .toList();
+});
+
+// ═══════════════════════════════════════════════════════════
+// 农场统计数据
+// ═══════════════════════════════════════════════════════════
+
 class FarmStats {
   final int total;
   final int online;

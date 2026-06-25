@@ -15,8 +15,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
-import '../../application/providers/printer_list_provider.dart';
 import '../../data/farm_printer_state.dart';
+import '../../data/camera_service.dart';
 import '../../data/printer_discovery.dart';
 import '../../data/printer_info.dart';
 import '../widgets/camera_view.dart';
@@ -45,10 +45,9 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    // 不用 .select() — 同一个 FarmPrinterState 对象引用不变时 Riverpod 不触发重建
-    // 因为 updateTelemetry 是原地修改对象属性
-    final registry = ref.watch(printerRegistryProvider);
-    final printer = registry[widget.sn];
+    // 监听 FarmStore 版本号 + 读取该打印机状态
+    ref.watch(farmStoreVersionProvider);
+    final printer = ref.read(farmStoreProvider).getPrinter(widget.sn);
 
     if (printer == null) {
       return Scaffold(
@@ -972,6 +971,9 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     return RegExp(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(ip);
   }
 
+  /// 缓存 cameraService 引用（dispose 时 ref 可能已失效）
+  CameraService? _cachedCameraService;
+
   @override
   void initState() {
     super.initState();
@@ -985,14 +987,11 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     if (_isActive) {
       _isActive = false;
       _frameUrl = null;
-      final cameraService = ref.read(cameraServiceProvider);
-      if (cameraService != null) {
-        cameraService.stopMonitor(
-          sn: widget.sn,
-          ip: _effectiveIp.trim(),
-          port: widget.port,
-        );
-      }
+      _cachedCameraService?.stopMonitor(
+        sn: widget.sn,
+        ip: _effectiveIp.trim(),
+        port: widget.port,
+      );
     }
     super.dispose();
   }
@@ -1011,8 +1010,8 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
       _error = null;
     });
 
-    final cameraService = ref.read(cameraServiceProvider);
-    if (cameraService == null) {
+    _cachedCameraService = ref.read(cameraServiceProvider);
+    if (_cachedCameraService == null) {
       setState(() {
         _isStarting = false;
         _error = 'MQTT 未连接，无法发送摄像头命令';
@@ -1020,7 +1019,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
       return;
     }
 
-    final result = await cameraService.startMonitor(
+    final result = await _cachedCameraService!.startMonitor(
       sn: widget.sn,
       ip: _effectiveIp.trim(),
       port: widget.port,
@@ -1044,8 +1043,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
 
   Future<void> _stopCamera() async {
     if (_frameUrl != null && _isActive) {
-      final cameraService = ref.read(cameraServiceProvider);
-      await cameraService?.stopMonitor(
+      await _cachedCameraService?.stopMonitor(
         sn: widget.sn,
         ip: _effectiveIp.trim(),
         port: widget.port,
@@ -1090,7 +1088,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
           _ipController.text = resolved;
           _isResolving = false;
         });
-        ref.read(printerRegistryProvider.notifier)
+        ref.read(farmStoreProvider)
             .updatePrinter(widget.sn, (p) { p.ip = resolved; return p; });
       } else {
         setState(() => _isResolving = false);
