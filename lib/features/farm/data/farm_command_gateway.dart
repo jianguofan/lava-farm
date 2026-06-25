@@ -30,6 +30,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import 'broker_connection_manager.dart';
 import 'unified_request_tracker.dart';
 
@@ -58,6 +60,7 @@ class CommandResult {
     Map<String, dynamic>? response,
   ) {
     if (response == null) {
+      debugPrint('[CMD] $sn/$method → timeout (${duration.inMilliseconds}ms)');
       return CommandResult(
         sn: sn,
         method: method,
@@ -69,21 +72,27 @@ class CommandResult {
 
     final rpcError = response['error'] as Map<String, dynamic>?;
     if (rpcError != null) {
+      final errMsg = rpcError['message']?.toString() ?? 'unknown_rpc_error';
+      final errCode = rpcError['code'];
+      debugPrint('[CMD] $sn/$method → RPC error: code=$errCode msg="$errMsg" raw=${response['result']}');
       return CommandResult(
         sn: sn,
         method: method,
         success: false,
-        error: rpcError['message']?.toString() ?? 'unknown_rpc_error',
+        error: errMsg,
         data: _extractData(response['result']),
         duration: duration,
       );
     }
 
+    final resultData = _extractData(response['result']);
+    final resultStr = response['result']?.toString();
+    debugPrint('[CMD] $sn/$method → success (${duration.inMilliseconds}ms), result type=${response['result']?.runtimeType}, data=$resultData, raw=${resultStr != null && resultStr.length > 200 ? resultStr.substring(0, 200) : resultStr}');
     return CommandResult(
       sn: sn,
       method: method,
       success: true,
-      data: _extractData(response['result']),
+      data: resultData,
       duration: duration,
     );
   }

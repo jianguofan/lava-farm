@@ -233,6 +233,39 @@ class FileUploader {
     );
   }
 
+  /// 上传原始字节到单台打印机（无需磁盘读取）
+  ///
+  /// 供 [BatchPrintCoordinator] 使用：一次性读取文件后分发给多台打印机，
+  /// 避免每台打印机都重新从磁盘读取。
+  ///
+  /// [fileBytes] 已读取的文件字节
+  /// [fileName]  远程文件名（如 benchy.3mf）
+  Future<UploadResult> uploadBytesToPrinter({
+    required String sn,
+    required String ip,
+    int port = 7125,
+    required String apiKey,
+    required String fileName,
+    required List<int> fileBytes,
+  }) async {
+    if (fileBytes.length > maxFileSize) {
+      return UploadResult(
+        printerSn: sn,
+        success: false,
+        duration: Duration.zero,
+        error: '文件过大: ${_formatSize(fileBytes.length)} (上限 ${_formatSize(maxFileSize)})',
+      );
+    }
+    return _uploadToPrinter(
+      sn: sn,
+      ip: ip,
+      port: port,
+      apiKey: apiKey,
+      fileName: fileName,
+      fileBytes: fileBytes,
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 内部实现
   // ═══════════════════════════════════════════════════════════
@@ -293,6 +326,11 @@ class FileUploader {
   }
 
   /// 执行 HTTP multipart 上传
+  ///
+  /// 与 PrintSection._uploadFile() 保持一致的上传格式：
+  /// - Authorization: (空值) — Moonraker LAN 模式要求
+  /// - multipart/form-data，file 字段带 Content-Type: application/octet-stream
+  /// - 无额外 path 字段（上传到根目录）
   Future<bool> _doUpload({
     required String ip,
     required int port,
@@ -306,32 +344,42 @@ class FileUploader {
     try {
       final uri = Uri.parse('http://$ip:$port/server/files/upload');
       final request = await client.postUrl(uri);
-      request.headers.set('X-Api-Key', apiKey);
+      // Moonraker LAN 模式：空 Authorization header
+      request.headers.set('Authorization', '');
 
-      // 构建 multipart 请求体
-      final boundary = '----LavaFarmUpload${DateTime.now().millisecondsSinceEpoch}';
-      request.headers.contentType =
-          ContentType('multipart', 'form-data', parameters: {'boundary': boundary});
-
-      final body = _buildMultipartBody(
-        boundary: boundary,
-        fileName: fileName,
-        fileBytes: fileBytes,
+      // 构建 multipart 请求体（与 PrintSection 一致）
+      final boundary =
+          '----LavaFarmUpload${DateTime.now().millisecondsSinceEpoch}';
+      request.headers.set(
+        'Content-Type',
+        'multipart/form-data; boundary=$boundary',
       );
 
-      request.contentLength = body.length;
-      request.add(body);
+      final body = BytesBuilder();
+      body.add(utf8.encode(
+        '--$boundary\r\n'
+        'Content-Disposition: form-data; name="file"; filename="$fileName"\r\n'
+        'Content-Type: application/octet-stream\r\n'
+        '\r\n',
+      ));
+      body.add(fileBytes);
+      body.add(utf8.encode('\r\n--$boundary--\r\n'));
+
+      final bodyBytes = body.toBytes();
+      request.contentLength = bodyBytes.length;
+      request.add(bodyBytes);
 
       final response = await request.close().timeout(uploadTimeout);
       client.close();
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        final body = await response.transform(utf8.decoder).join();
-        final json = jsonDecode(body) as Map<String, dynamic>;
-        final result = json['result'] as Map<String, dynamic>?;
-
-        // Moonraker 返回 {"result": {"item": {...}}} 表示成功
-        return result != null && result['item'] != null;
+        final respBody = await response.transform(utf8.decoder).join();
+        final json = jsonDecode(respBody) as Map<String, dynamic>;
+        // Moonraker 响应: {"action":"create_file","item":{...}}
+        //             或: {"result":{"item":{...}}}
+        final item = json['item'] as Map<String, dynamic>?;
+        final resultItem = json['result']?['item'] as Map<String, dynamic>?;
+        return item != null || resultItem != null;
       }
 
       return false;
@@ -339,38 +387,6 @@ class FileUploader {
       client.close();
       rethrow;
     }
-  }
-
-  /// 构建 multipart/form-data 请求体
-  List<int> _buildMultipartBody({
-    required String boundary,
-    required String fileName,
-    required List<int> fileBytes,
-  }) {
-    final body = BytesBuilder();
-
-    // 文件字段
-    body.add(utf8.encode(
-      '--$boundary\r\n'
-      'Content-Disposition: form-data; name="file"; filename="$fileName"\r\n'
-      'Content-Type: application/octet-stream\r\n'
-      '\r\n',
-    ));
-    body.add(fileBytes);
-    body.add(utf8.encode('\r\n'));
-
-    // root 字段（上传到根目录）
-    body.add(utf8.encode(
-      '--$boundary\r\n'
-      'Content-Disposition: form-data; name="path"\r\n'
-      '\r\n'
-      '\r\n',
-    ));
-
-    // 结束边界
-    body.add(utf8.encode('--$boundary--\r\n'));
-
-    return body.toBytes();
   }
 
   /// 上传后校验文件大小
@@ -389,15 +405,16 @@ class FileUploader {
         'http://$ip:$port/server/files/metadata?filename=$fileName',
       );
       final request = await client.getUrl(uri);
-      request.headers.set('X-Api-Key', apiKey);
+      request.headers.set('Authorization', '');
 
       final response = await request.close().timeout(const Duration(seconds: 5));
       client.close();
 
       if (response.statusCode == 200) {
-        final body = await response.transform(utf8.decoder).join();
-        final json = jsonDecode(body) as Map<String, dynamic>;
-        final fileInfo = json['result'] as Map<String, dynamic>?;
+        final respBody = await response.transform(utf8.decoder).join();
+        final json = jsonDecode(respBody) as Map<String, dynamic>;
+        final fileInfo = (json['result'] as Map<String, dynamic>?) ??
+            (json['file'] as Map<String, dynamic>?);
         final size = fileInfo?['size'] as int?;
 
         // 容忍 1 字节误差

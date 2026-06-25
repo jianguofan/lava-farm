@@ -111,6 +111,11 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           ),
           const SizedBox(width: 8),
           IconButton(
+            icon: const Icon(Icons.dashboard_customize),
+            tooltip: '群控打印',
+            onPressed: () => _openBatchPrint(context),
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
             tooltip: '添加打印机',
             onPressed: () => _openDiscovery(context),
@@ -242,9 +247,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
         _showGcodeDialog(context, sns);
         break;
       case BatchAction.uploadAndPrint:
-        // TODO: FileUploader.batchUploadAndPrint
-        _showSnackBar(context, '打开文件选择...');
-        break;
+        _openBatchPrint(context);
+        return; // 不 clear selection（导航到群控页后由新页面决定）
     }
 
     setState(() => _selectedSns.clear());
@@ -325,6 +329,14 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => PrinterDetailPage(sn: sn)),
+    );
+  }
+
+  void _openBatchPrint(BuildContext context) {
+    Navigator.pushNamed(
+      context,
+      '/batch-print',
+      arguments: _selectedSns.toList(),
     );
   }
 

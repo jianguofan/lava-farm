@@ -14,6 +14,7 @@
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../data/batch_print_coordinator.dart';
 import '../../data/broker_connection_manager.dart';
 import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
@@ -173,4 +174,12 @@ final farmHubProvider = Provider<FarmHub>((ref) {
     discovery: PrinterDiscovery(),
     credentialStore: credentialStore,
   );
+});
+
+/// BatchPrintCoordinator Provider — 群控打印协调器
+///
+/// 注入 FileUploader + FarmCommandGateway，提供多台并发上传+打印能力。
+final batchPrintCoordinatorProvider = Provider<BatchPrintCoordinator>((ref) {
+  final gateway = ref.watch(farmCommandGatewayProvider);
+  return BatchPrintCoordinator(gateway: gateway);
 });
