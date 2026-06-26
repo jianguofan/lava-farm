@@ -20,6 +20,7 @@ import '../../data/camera_service.dart';
 import '../../data/printer_discovery.dart';
 import '../../data/printer_info.dart';
 import '../widgets/camera_view.dart';
+import '../widgets/thumbnail_image.dart';
 import '../widgets/print_section.dart';
 
 /// 打印机详情页
@@ -479,7 +480,6 @@ class _PrintProgressSectionState extends ConsumerState<_PrintProgressSection> {
     final layer = p.layerNum?.value;
     final totalLayer = p.totalLayers?.value;
     final isPaused = p.printState?.value == 'paused';
-    final isPrinting = p.isFileActive?.value == true || p.isPrinting;
 
     // 剩余时间：优先用 estimated_time，否则根据进度推算
     String etaText = '--';
@@ -534,23 +534,14 @@ class _PrintProgressSectionState extends ConsumerState<_PrintProgressSection> {
             // ── 缩略图 + 进度环 ──
             Row(
               children: [
-                // 缩略图占位（后续接摄像头）
-                Container(
+                // ── 缩略图 ──
+                PrintThumbnail(
+                  sn: p.sn,
+                  filename: p.currentFile?.value,
+                  ip: p.ip,
+                  port: p.port,
                   width: 80,
                   height: 80,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.image, size: 28, color: Colors.grey.shade400),
-                      const SizedBox(height: 2),
-                      Text('预览', style: TextStyle(fontSize: 9, color: Colors.grey.shade400)),
-                    ],
-                  ),
                 ),
                 const SizedBox(width: 16),
                 // 进度 + 百分比

@@ -58,15 +58,17 @@ class CommandResult {
     String sn,
     String method,
     Duration duration,
-    Map<String, dynamic>? response,
-  ) {
+    Map<String, dynamic>? response, {
+    String? timeoutDetail,
+  }) {
     if (response == null) {
-      debugPrint('[CMD] $sn/$method → timeout (${duration.inMilliseconds}ms)');
+      final detail = timeoutDetail ?? 'no response received';
+      debugPrint('[CMD] $sn/$method → timeout (${duration.inMilliseconds}ms): $detail');
       return CommandResult(
         sn: sn,
         method: method,
         success: false,
-        error: 'timeout',
+        error: 'timeout(${duration.inSeconds}s): $detail',
         duration: duration,
       );
     }
@@ -229,7 +231,17 @@ class FarmCommandGateway {
     final response = await future;
     final duration = DateTime.now().difference(startTime);
 
-    return CommandResult.fromResponse(sn, method, duration, response);
+    final timeoutDetail = response == null
+        ? '等待 $sn/response 超时 (requestId=$requestId, topic=$sn/request → $sn/response)'
+        : null;
+
+    return CommandResult.fromResponse(
+      sn,
+      method,
+      duration,
+      response,
+      timeoutDetail: timeoutDetail,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -339,8 +351,14 @@ class FarmCommandGateway {
 
       final response = await future;
       final duration = DateTime.now().difference(startTime);
+      final timeoutDetail = response == null
+          ? '等待 $sn/response 超时 (requestId=$requestId)'
+          : null;
       handle._addResult(
-        CommandResult.fromResponse(sn, method, duration, response),
+        CommandResult.fromResponse(
+          sn, method, duration, response,
+          timeoutDetail: timeoutDetail,
+        ),
       );
     } catch (e) {
       final duration = DateTime.now().difference(startTime);

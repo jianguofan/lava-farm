@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
+import '../../data/batch_operator.dart';
+import '../../data/farm_printer_state.dart';
 import '../../data/farm_store.dart';
 import '../../data/printer_info.dart';
 import '../widgets/batch_toolbar.dart';
@@ -228,42 +230,59 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
   }
 
   /// 处理批量操作
-  void _handleBatchAction(BuildContext context, BatchAction action) {
+  Future<void> _handleBatchAction(BuildContext context, BatchAction action) async {
     final sns = _selectedSns.toList();
-    if (sns.isEmpty) return;
+    if (sns.isEmpty && action != BatchAction.emergencyStop) return;
+
+    final operator = ref.read(batchOperatorProvider);
 
     switch (action) {
       case BatchAction.pause:
-        // TODO: BatchOperator.batchPause(sns)
-        _showSnackBar(context, '暂停 ${sns.length} 台打印机');
+        _showSnackBar(context, '正在暂停 ${sns.length} 台打印机...');
+        final results = await operator.batchPause(sns);
+        _showBatchResult(context, '暂停', results);
         break;
       case BatchAction.cancel:
-        // TODO: BatchOperator.batchCancel(sns)
-        _showSnackBar(context, '取消 ${sns.length} 台打印机');
+        _showSnackBar(context, '正在取消 ${sns.length} 台打印机...');
+        final results = await operator.batchCancel(sns);
+        _showBatchResult(context, '取消', results);
         break;
       case BatchAction.emergencyStop:
-        // TODO: BatchOperator.batchEmergencyStop()
-        _showSnackBar(context, '急停所有打印机', isError: true);
+        final allSns = ref.read(farmStoreProvider).allPrinters.map((p) => p.sn).toList();
+        if (allSns.isEmpty) return;
+        _showSnackBar(context, '正在急停所有打印机...', isError: true);
+        final results = await operator.batchEmergencyStop();
+        _showBatchResult(context, '急停', results);
         break;
       case BatchAction.setTemperatures:
         _showTempDialog(context, sns);
-        break;
+        return; // 不清除选择（对话框内处理）
       case BatchAction.sendGcode:
         _showGcodeDialog(context, sns);
-        break;
+        return; // 不清除选择（对话框内处理）
       case BatchAction.uploadAndPrint:
         _openBatchPrint(context);
-        return; // 不 clear selection（导航到群控页后由新页面决定）
+        return; // 不清除选择（导航到群控页）
     }
 
     setState(() => _selectedSns.clear());
   }
 
+  void _showBatchResult(BuildContext context, String action, List<BatchResult> results) {
+    final ok = results.where((r) => r.success).length;
+    final fail = results.where((r) => !r.success).length;
+    final msg = fail > 0
+        ? '$action完成: $ok 成功, $fail 失败'
+        : '$action完成: 全部 $ok 台成功';
+    _showSnackBar(context, msg, isError: fail > 0);
+  }
+
   void _showTempDialog(BuildContext context, List<String> sns) {
     final controller = TextEditingController(text: '210');
+    final operator = ref.read(batchOperatorProvider);
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: Text('设置喷嘴温度 (${sns.length} 台)'),
         content: TextField(
           controller: controller,
@@ -274,11 +293,18 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              // TODO: BatchOperator.batchSetNozzleTemp(sns, temp)
+            onPressed: () async {
+              final temp = double.tryParse(controller.text);
+              if (temp == null) return;
+              Navigator.pop(ctx);
+              _showSnackBar(context, '正在设置 ${sns.length} 台打印机温度为 ${temp.toInt()}°C...');
+              final results = await operator.batchSetNozzleTemp(
+                printerSns: sns, temp: temp,
+              );
+              _showBatchResult(context, '设置温度', results);
+              if (mounted) setState(() => _selectedSns.clear());
             },
             child: const Text('设置'),
           ),
@@ -289,9 +315,10 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
 
   void _showGcodeDialog(BuildContext context, List<String> sns) {
     final controller = TextEditingController();
+    final operator = ref.read(batchOperatorProvider);
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: Text('发送 GCode (${sns.length} 台)'),
         content: TextField(
           controller: controller,
@@ -303,11 +330,18 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              // TODO: BatchOperator.batchGcode(sns, gcode)
+            onPressed: () async {
+              final gcode = controller.text.trim();
+              if (gcode.isEmpty) return;
+              Navigator.pop(ctx);
+              _showSnackBar(context, '正在发送 GCode 到 ${sns.length} 台打印机...');
+              final results = await operator.batchGcode(
+                printerSns: sns, gcode: gcode,
+              );
+              _showBatchResult(context, 'GCode', results);
+              if (mounted) setState(() => _selectedSns.clear());
             },
             child: const Text('发送'),
           ),

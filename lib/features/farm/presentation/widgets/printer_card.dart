@@ -15,6 +15,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../application/providers/broker_state_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/printer_info.dart';
+import 'thumbnail_image.dart';
 
 /// 打印机卡片
 ///
@@ -292,32 +293,46 @@ class _ProgressSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final progress = printer.progress?.value ?? 0.0;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              printer.currentFile?.value ?? '打印中...',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            Text(
-              '${(progress * 100).toStringAsFixed(0)}%',
-              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
-            ),
-          ],
+        // 缩略图
+        PrintThumbnail(
+          sn: printer.sn,
+          filename: printer.currentFile?.value,
+          ip: printer.ip,
+          port: printer.port,
+          width: 40,
+          height: 40,
+          showLoadingIndicator: false,
         ),
-        const SizedBox(height: 3),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(2),
-          child: LinearProgressIndicator(
-            value: progress.clamp(0.0, 1.0),
-            minHeight: 3,
-            backgroundColor: Colors.grey.shade200,
+        const SizedBox(width: 8),
+        // 进度区
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                printer.currentFile?.value ?? '打印中...',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 3),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: progress.clamp(0.0, 1.0),
+                  minHeight: 3,
+                  backgroundColor: Colors.grey.shade200,
+                ),
+              ),
+            ],
           ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '${(progress * 100).toStringAsFixed(0)}%',
+          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
         ),
       ],
     );

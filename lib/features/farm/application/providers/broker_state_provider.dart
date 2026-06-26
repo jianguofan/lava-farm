@@ -15,12 +15,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/batch_print_coordinator.dart';
+import '../../data/batch_operator.dart';
 import '../../data/broker_connection_manager.dart';
 import '../../data/farm_logger.dart';
 import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
 import '../../data/camera_service.dart';
+import '../../data/thumbnail_service.dart';
 import '../services/farm_hub.dart';
 import '../../data/farm_store.dart';
 import '../../data/mqtt_transport_impl.dart';
@@ -197,6 +199,16 @@ final cameraServiceProvider = Provider<CameraService?>((ref) {
 });
 
 // ═══════════════════════════════════════════════════════════
+// Thumbnail Service
+// ═══════════════════════════════════════════════════════════
+
+final thumbnailServiceProvider = Provider<ThumbnailService?>((ref) {
+  final router = ref.watch(farmMqttRouterProvider);
+  if (router == null) return null;
+  return ThumbnailService(router: router);
+});
+
+// ═══════════════════════════════════════════════════════════
 // FarmHub — 群控总入口
 // ═══════════════════════════════════════════════════════════
 
@@ -219,4 +231,14 @@ final farmHubProvider = Provider<FarmHub>((ref) {
 final batchPrintCoordinatorProvider = Provider<BatchPrintCoordinator>((ref) {
   final gateway = ref.watch(farmCommandGatewayProvider);
   return BatchPrintCoordinator(gateway: gateway);
+});
+
+// ═══════════════════════════════════════════════════════════
+// BatchOperator — 批量操作引擎（暂停/取消/急停/GCode/温度）
+// ═══════════════════════════════════════════════════════════
+
+final batchOperatorProvider = Provider<BatchOperator>((ref) {
+  final store = ref.watch(farmStoreProvider);
+  final gateway = ref.watch(farmCommandGatewayProvider);
+  return BatchOperator(store: store, gateway: gateway);
 });

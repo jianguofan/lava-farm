@@ -211,7 +211,11 @@ class FarmPrinterState {
     // 明确打印中
     if (state == 'printing') return true;
     // printState 缺失时，用 isFileActive 辅助判断
-    return isFileActive?.value == true;
+    if (isFileActive?.value == true) return true;
+    // printState 缺失时，用 print_duration > 0 辅助判断（重启后首次状态推送通常不含 state）
+    final pd = printDuration?.value;
+    if (pd != null && pd > 0) return true;
+    return false;
   }
 
   bool get isPaused => printState?.value == 'paused';
@@ -447,6 +451,20 @@ class FarmPrinterState {
     }
     if (data.containsKey('print_stats.filament_used')) {
       filamentUsed = (data['print_stats.filament_used'] as num).toDouble();
+    }
+
+    // 推断打印状态：如果本次更新未包含 print_stats.state，
+    // 但 print_duration 或 filament_used 有正值，则推断为 printing。
+    // 解决重启后首次 MQTT 推送只含增量数据（不含 state）的问题。
+    if (!data.containsKey('print_stats.state')) {
+      final pd = printDuration?.value ?? 0;
+      final fu = filamentUsed ?? 0;
+      if (pd > 0 || fu > 0) {
+        // 仅在 state 缺失时推断，不覆盖已有明确状态
+        if (printState == null) {
+          printState = Staleable('printing');
+        }
+      }
     }
 
     if (eventTime != null) {
