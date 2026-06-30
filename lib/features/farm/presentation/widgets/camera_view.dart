@@ -10,6 +10,7 @@
 
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -41,7 +42,7 @@ class MjpegView extends StatefulWidget {
 class _MjpegViewState extends State<MjpegView> {
   http.Client? _client;
   StreamSubscription<List<int>>? _subscription;
-  Uint8List? _currentFrame;
+  ui.Image? _currentImage;
   String? _error;
   bool _connecting = true;
   Timer? _retryTimer;
@@ -68,6 +69,7 @@ class _MjpegViewState extends State<MjpegView> {
   void dispose() {
     _retryTimer?.cancel();
     _disconnect();
+    _currentImage?.dispose();
     super.dispose();
   }
 
@@ -82,6 +84,9 @@ class _MjpegViewState extends State<MjpegView> {
 
   Future<void> _connect() async {
     _disconnect();
+    final oldImage = _currentImage;
+    _currentImage = null;
+    oldImage?.dispose();
     setState(() {
       _connecting = true;
       _error = null;
@@ -119,13 +124,28 @@ class _MjpegViewState extends State<MjpegView> {
     }
   }
 
-  void _onFrame(Uint8List jpeg) {
+  void _onFrame(Uint8List jpeg) async {
     if (!mounted) return;
-    setState(() {
-      _currentFrame = jpeg;
-      _connecting = false;
-      _error = null;
-    });
+    try {
+      final codec = await ui.instantiateImageCodec(jpeg);
+      final frameInfo = await codec.getNextFrame();
+      final newImage = frameInfo.image;
+
+      if (!mounted) {
+        newImage.dispose();
+        return;
+      }
+
+      final oldImage = _currentImage;
+      setState(() {
+        _currentImage = newImage;
+        _connecting = false;
+        _error = null;
+      });
+      oldImage?.dispose();
+    } catch (e) {
+      debugPrint('MjpegView: decode error: $e');
+    }
   }
 
   void _onError(String msg) {
@@ -159,12 +179,8 @@ class _MjpegViewState extends State<MjpegView> {
             ),
           );
     }
-    if (_currentFrame != null) {
-      return Image.memory(
-        _currentFrame!,
-        fit: BoxFit.cover,
-        gaplessPlayback: false,
-      );
+    if (_currentImage != null) {
+      return RawImage(image: _currentImage, fit: BoxFit.cover);
     }
     return widget.loadingWidget ??
         const Center(child: CircularProgressIndicator());
