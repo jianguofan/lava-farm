@@ -2,12 +2,12 @@
 ///
 /// 混合方式：
 ///   MQTT camera.start_monitor  → 激活打印机摄像头
-///   HTTP GET {frameUrl}        → 轮询帧画面（快照）
+///   HTTP GET {streamUrl}       → MJPEG 长连接流（MjpegView 渲染）
 ///   MQTT camera.stop_monitor   → 停止摄像头
 ///
 /// 由于 Moonraker MQTT handler 对 camera 命令不返回响应，
 /// startMonitor 采用 fire-and-forget 方式发送命令，
-/// 然后由 CameraView 轮询 HTTP URL 获取帧画面。
+/// 然后由 MjpegView 通过 HTTP 长连接解析 multipart/x-mixed-replace 流。
 
 import 'dart:async';
 import 'dart:convert';
@@ -19,12 +19,14 @@ import 'farm_mqtt_router.dart';
 
 class CameraStartResult {
   final bool success;
-  final String? frameUrl;
+  final String? frameUrl;   // 快照 URL（轮询方案，已废弃，保留兼容）
+  final String? streamUrl;  // MJPEG 流 URL（长连接方案）
   final String? error;
 
   const CameraStartResult({
     required this.success,
     this.frameUrl,
+    this.streamUrl,
     this.error,
   });
 }
@@ -52,6 +54,7 @@ class CameraService {
       return CameraStartResult(
         success: true,
         frameUrl: _buildFrameUrl(ip, port),
+        streamUrl: _buildStreamUrl(ip, port),
       );
     }
 
@@ -74,8 +77,9 @@ class CameraService {
 
     _activeMonitors.add(sn);
     final frameUrl = _buildFrameUrl(ip, port);
-    debugPrint('[CameraService] $sn: 帧 URL = $frameUrl');
-    return CameraStartResult(success: true, frameUrl: frameUrl);
+    final streamUrl = _buildStreamUrl(ip, port);
+    debugPrint('[CameraService] $sn: 帧 URL = $frameUrl, 流 URL = $streamUrl');
+    return CameraStartResult(success: true, frameUrl: frameUrl, streamUrl: streamUrl);
   }
 
   /// 停止摄像头
@@ -104,6 +108,12 @@ class CameraService {
   /// 格式: http://{ip}:{port}/server/files/camera/monitor.jpg
   String _buildFrameUrl(String ip, int port) {
     return 'http://$ip:$port/server/files/camera/monitor.jpg';
+  }
+
+  /// 构造 MJPEG 流 URL
+  /// 格式: http://{ip}:{port}/webcam/stream
+  String _buildStreamUrl(String ip, int port) {
+    return 'http://$ip:$port/webcam/stream';
   }
 
   /// 通过 MQTT machine.system_info 获取设备真实 LAN IP

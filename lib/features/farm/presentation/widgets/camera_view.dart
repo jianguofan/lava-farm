@@ -1,267 +1,338 @@
-/// CameraView — 摄像头实时画面组件
-///
-/// 定时轮询快照 URL（LAN 100ms）+ key 驱动重建 + 交叉淡入过渡，
-/// 模拟视频流效果。
+/// MjpegView — MJPEG multipart 流解析 Widget
 ///
 /// 用法:
-///   CameraView(
-///     frameUrl: 'http://192.168.1.100:7125/webcam/snapshot',
-///     isActive: true,
-///   )
+///   MjpegView(url: "http://192.168.1.150:7125/webcam/stream")
+///
+/// 原理:
+///   后端持续推送 multipart/x-mixed-replace 格式的 MJPEG 流，
+///   每个 boundary 之间是一帧完整 JPEG。本 Widget 通过 http
+///   包建立长连接，逐字节解析 boundary → 提取 JPEG → Image.memory() 渲染。
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
-class CameraView extends StatefulWidget {
-  final String frameUrl;
-  final bool isActive;
-  final Duration pollInterval;
+class MjpegView extends StatefulWidget {
+  final String url;
 
-  const CameraView({
+  /// 连接失败或超时后的重试间隔（秒），0 表示不重试
+  final int retrySeconds;
+
+  /// 加载中占位 Widget
+  final Widget? loadingWidget;
+
+  /// 连接失败占位 Widget
+  final Widget Function(String error)? errorWidget;
+
+  const MjpegView({
     super.key,
-    required this.frameUrl,
-    required this.isActive,
-    this.pollInterval = const Duration(milliseconds: 100),
+    required this.url,
+    this.retrySeconds = 3,
+    this.loadingWidget,
+    this.errorWidget,
   });
 
   @override
-  State<CameraView> createState() => _CameraViewState();
+  State<MjpegView> createState() => _MjpegViewState();
 }
 
-class _CameraViewState extends State<CameraView>
-    with SingleTickerProviderStateMixin {
-  Timer? _pollTimer;
+class _MjpegViewState extends State<MjpegView> {
+  http.Client? _client;
+  StreamSubscription<List<int>>? _subscription;
+  Uint8List? _currentFrame;
+  String? _error;
+  bool _connecting = true;
+  Timer? _retryTimer;
 
-  /// 帧计数器，用作 Image widget 的 key 来强制刷新
-  int _frameCount = 0;
+  // ─── Boundary 解析状态 ─────────────────────────────────────────
+  // 后端输出格式:
+  //   --mjpeg-boundary\r\n
+  //   Content-Type: image/jpeg\r\n
+  //   Content-Length: 24567\r\n
+  //   \r\n
+  //   <JPEG bytes>
+  //   \r\n
 
-  /// 当前显示的 URL（带时间戳防缓存）
-  String? _currentUrl;
-
-  /// 上一帧 URL（用于交叉淡入）
-  String? _previousUrl;
-
-  /// 淡入动画
-  late AnimationController _fadeController;
-  late Animation<double> _fadeAnimation;
-
-  /// 状态
-  bool _isLoading = true;
-  int _consecutiveErrors = 0;
-  static const int _maxErrors = 5;
+  final _boundary = '--mjpeg-boundary'.codeUnits;
+  final _headerEnd = '\r\n\r\n'.codeUnits;
 
   @override
   void initState() {
     super.initState();
-    _fadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 100),
-    );
-    _fadeAnimation = CurvedAnimation(
-      parent: _fadeController,
-      curve: Curves.linear,
-    );
-    _fadeController.value = 1.0;
-
-    if (widget.isActive) {
-      _startPolling();
-    }
-  }
-
-  @override
-  void didUpdateWidget(CameraView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-
-    if (widget.isActive && !oldWidget.isActive) {
-      _startPolling();
-    } else if (!widget.isActive && oldWidget.isActive) {
-      _stopPolling();
-    }
-
-    if (widget.frameUrl != oldWidget.frameUrl) {
-      _currentUrl = null;
-      _previousUrl = null;
-      _frameCount = 0;
-      _isLoading = true;
-      _consecutiveErrors = 0;
-      if (widget.isActive) {
-        _fetchFrame();
-      }
-    }
+    _connect();
   }
 
   @override
   void dispose() {
-    _stopPolling();
-    _fadeController.dispose();
+    _retryTimer?.cancel();
+    _disconnect();
     super.dispose();
   }
 
-  void _startPolling() {
-    _stopPolling();
-    _currentUrl = null;
-    _previousUrl = null;
-    _frameCount = 0;
-    _isLoading = true;
-    _consecutiveErrors = 0;
-    _fetchFrame();
-    _pollTimer = Timer.periodic(widget.pollInterval, (_) => _fetchFrame());
+  // ─── 连接管理 ──────────────────────────────────────────────────
+
+  void _disconnect() {
+    _subscription?.cancel();
+    _subscription = null;
+    _client?.close();
+    _client = null;
   }
 
-  void _stopPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = null;
-  }
-
-  /// 请求一帧快照
-  Future<void> _fetchFrame() async {
-    final url =
-        '${widget.frameUrl}?ts=${DateTime.now().microsecondsSinceEpoch}';
+  Future<void> _connect() async {
+    _disconnect();
+    setState(() {
+      _connecting = true;
+      _error = null;
+    });
 
     try {
-      // 先验证 URL 可达（HEAD 或直接加载）
-      // 使用 NetworkImage.resolve 来检查
-      final provider = NetworkImage(url);
-      final completer = Completer<void>();
+      final client = http.Client();
+      final request = http.Request('GET', Uri.parse(widget.url));
+      final response = await client.send(request);
 
-      final stream = provider.resolve(const ImageConfiguration());
-      late ImageStreamListener listener;
+      if (response.statusCode != 200) {
+        final body = await response.stream.bytesToString();
+        _onError('HTTP ${response.statusCode}: $body');
+        client.close();
+        return;
+      }
 
-      listener = ImageStreamListener(
-        (ImageInfo info, bool sync) {
-          // 成功加载
-          if (!mounted) return;
-          _consecutiveErrors = 0;
-
-          // 将当前帧推为上一帧，新帧为当前帧
-          _previousUrl = _currentUrl;
-          _currentUrl = url;
-          _frameCount++;
-
-          final wasLoading = _isLoading;
-          setState(() {
-            _isLoading = false;
-          });
-
-          // 交叉淡入：从 0 → 1
-          if (!wasLoading && _previousUrl != null) {
-            _fadeController.forward(from: 0.0);
-          }
-
-          stream.removeListener(listener);
-          if (!completer.isCompleted) completer.complete();
-        },
-        onError: (dynamic error, StackTrace? stackTrace) {
-          stream.removeListener(listener);
-          if (!completer.isCompleted) completer.completeError(error);
-        },
+      _client = client;
+      _connecting = false;
+      final parser = _MjpegParser(
+        boundary: _boundary,
+        headerEnd: _headerEnd,
+        onFrame: _onFrame,
       );
 
-      stream.addListener(listener);
-      await completer.future;
+      _subscription = response.stream.listen(
+        parser.feed,
+        onError: (e) => _onError('Stream error: $e'),
+        onDone: () => _onError('Stream ended'),
+        cancelOnError: false,
+      );
+      // ignore: avoid_dynamic_calls
     } catch (e) {
-      if (!mounted) return;
-      _consecutiveErrors++;
-      debugPrint('[CameraView] 帧加载失败 ($_consecutiveErrors/$_maxErrors): $e');
-      if (_consecutiveErrors >= _maxErrors) {
-        setState(() {}); // 触发错误 UI
-      }
+      _onError('Connection failed: $e');
+    }
+  }
+
+  void _onFrame(Uint8List jpeg) {
+    if (!mounted) return;
+    setState(() {
+      _currentFrame = jpeg;
+      _connecting = false;
+      _error = null;
+    });
+  }
+
+  void _onError(String msg) {
+    if (!mounted) return;
+    debugPrint('MjpegView: $msg');
+    setState(() {
+      _error = msg;
+      _connecting = false;
+    });
+    if (widget.retrySeconds > 0) {
+      _retryTimer = Timer(Duration(seconds: widget.retrySeconds), _connect);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 16 / 9,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: _buildContent(),
-      ),
-    );
-  }
-
-  Widget _buildContent() {
-    // 错误
-    if (_consecutiveErrors >= _maxErrors) {
-      return _buildErrorView();
+    if (_connecting) {
+      return widget.loadingWidget ??
+          const Center(child: CircularProgressIndicator());
     }
-
-    // 加载中
-    if (_isLoading && _currentUrl == null) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Colors.white54, strokeWidth: 2),
-            SizedBox(height: 12),
-            Text('正在连接摄像头...',
-                style: TextStyle(color: Colors.white54, fontSize: 13)),
-          ],
-        ),
+    if (_error != null) {
+      return widget.errorWidget?.call(_error!) ??
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.red, fontSize: 12),
+              ),
+            ),
+          );
+    }
+    if (_currentFrame != null) {
+      return Image.memory(
+        _currentFrame!,
+        fit: BoxFit.cover,
+        gaplessPlayback: false,
       );
     }
-
-    // 有画面 — 双层 Stack 交叉淡入
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // 底层：上一帧（或相同帧，用于背景填充）
-        if (_previousUrl != null)
-          Image.network(
-            _previousUrl!,
-            fit: BoxFit.contain,
-            gaplessPlayback: true,
-            cacheWidth: 640, // 限制解码分辨率，节省内存
-            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-          ),
-
-        // 顶层：当前帧，淡入
-        if (_currentUrl != null)
-          FadeTransition(
-            opacity: _fadeAnimation,
-            child: Image.network(
-              _currentUrl!,
-              key: ValueKey(_frameCount), // 强制重建
-              fit: BoxFit.contain,
-              gaplessPlayback: true,
-              cacheWidth: 640,
-              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildErrorView() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.videocam_off, color: Colors.white38, size: 48),
-          const SizedBox(height: 12),
-          const Text('摄像头画面获取失败',
-              style: TextStyle(color: Colors.white54, fontSize: 13)),
-          const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: () {
-              _consecutiveErrors = 0;
-              _isLoading = true;
-              _currentUrl = null;
-              _previousUrl = null;
-              setState(() {});
-              _fetchFrame();
-            },
-            icon: const Icon(Icons.refresh, size: 16),
-            label:
-                const Text('重试', style: TextStyle(color: Colors.white70)),
-          ),
-        ],
-      ),
-    );
+    return widget.loadingWidget ??
+        const Center(child: CircularProgressIndicator());
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// MJPEG multipart 流解析器（纯 Dart，零依赖）
+// ═══════════════════════════════════════════════════════════════════
+
+class _MjpegParser {
+  final List<int> _boundary;
+  final List<int> _headerEnd;
+  final void Function(Uint8List jpeg) onFrame;
+
+  /// 未消费的字节缓冲区
+  final _buf = <int>[];
+
+  /// 当前状态
+  _State _state = _State.seekBoundary;
+
+  /// 找到 boundary + header end 后待收集的帧字节数
+  int _pendingBytes = 0;
+
+  _MjpegParser({
+    required List<int> boundary,
+    required List<int> headerEnd,
+    required this.onFrame,
+  })  : _boundary = boundary,
+        _headerEnd = headerEnd;
+
+  void feed(List<int> chunk) {
+    _buf.addAll(chunk);
+
+    while (true) {
+      switch (_state) {
+        case _State.seekBoundary:
+          _doSeekBoundary();
+        case _State.readHeaders:
+          _doReadHeaders();
+        case _State.readFrame:
+          _doReadFrame();
+        case _State.discardToBoundary:
+          _doDiscardToBoundary();
+      }
+      // 如果在某个状态没有进展（buffer 不够），跳出循环等下一批数据
+      if (_state == _State.seekBoundary && !_hasBoundary() ||
+          _state == _State.readHeaders && !_hasHeaderEnd() ||
+          _state == _State.readFrame && _buf.length < _pendingBytes) {
+        break;
+      }
+    }
+  }
+
+  // ─── 状态机实现 ─────────────────────────────────────────────────
+
+  void _doSeekBoundary() {
+    final idx = _indexOf(_buf, _boundary);
+    if (idx < 0) {
+      // 保留最后几个字节（防止 boundary 跨 chunk 边界）
+      if (_buf.length > _boundary.length) {
+        _buf.removeRange(0, _buf.length - _boundary.length + 1);
+      }
+      return;
+    }
+    // 丢弃 boundary 之前的所有数据
+    _buf.removeRange(0, idx + _boundary.length);
+    _state = _State.readHeaders;
+  }
+
+  void _doReadHeaders() {
+    // boundary 之后紧接 \r\n，统一跳过
+    while (_buf.isNotEmpty && (_buf[0] == 0x0D || _buf[0] == 0x0A)) {
+      _buf.removeAt(0);
+    }
+
+    final hdrEnd = _indexOf(_buf, _headerEnd);
+    if (hdrEnd < 0) return; // 等更多数据
+
+    // 解析 Content-Length
+    final headerBytes = _buf.sublist(0, hdrEnd);
+    final headerStr = String.fromCharCodes(headerBytes);
+    final contentLength = _parseContentLength(headerStr);
+
+    // 丢弃 headers + \r\n\r\n
+    _buf.removeRange(0, hdrEnd + _headerEnd.length);
+
+    if (contentLength != null && contentLength > 0) {
+      _pendingBytes = contentLength;
+      _state = _State.readFrame;
+    } else {
+      // 没有 Content-Length，在收到下一个 boundary 时截断
+      _pendingBytes = -1;
+      _state = _State.readFrame;
+    }
+  }
+
+  void _doReadFrame() {
+    if (_pendingBytes > 0) {
+      // 有 Content-Length：精确读取
+      if (_buf.length < _pendingBytes) return; // 等更多数据
+      final frame = Uint8List.fromList(_buf.sublist(0, _pendingBytes));
+      _buf.removeRange(0, _pendingBytes);
+      onFrame(frame);
+      // 跳过帧后的 \r\n
+      _trimLeadingCRLF();
+      _state = _State.seekBoundary;
+    } else {
+      // 无 Content-Length：找到下一个 boundary 截断
+      final nextBd = _indexOf(_buf, _boundary);
+      if (nextBd < 0) return; // 还没看到下一个 boundary
+      // boundary 之前的字节就是帧数据（去掉末尾的 \r\n）
+      var frameEnd = nextBd;
+      while (frameEnd > 0 &&
+          (_buf[frameEnd - 1] == 0x0D || _buf[frameEnd - 1] == 0x0A)) {
+        frameEnd--;
+      }
+      if (frameEnd > 0) {
+        final frame = Uint8List.fromList(_buf.sublist(0, frameEnd));
+        onFrame(frame);
+      }
+      _buf.removeRange(0, nextBd);
+      _state = _State.seekBoundary;
+    }
+  }
+
+  void _doDiscardToBoundary() {
+    final idx = _indexOf(_buf, _boundary);
+    if (idx >= 0) {
+      _buf.removeRange(0, idx);
+      _state = _State.seekBoundary;
+    } else {
+      if (_buf.length > _boundary.length) {
+        _buf.removeRange(0, _buf.length - _boundary.length + 1);
+      }
+    }
+  }
+
+  // ─── 工具方法 ───────────────────────────────────────────────────
+
+  bool _hasBoundary() => _indexOf(_buf, _boundary) >= 0;
+  bool _hasHeaderEnd() => _indexOf(_buf, _headerEnd) >= 0;
+
+  static int _indexOf(List<int> haystack, List<int> needle) {
+    outer:
+    for (var i = 0; i <= haystack.length - needle.length; i++) {
+      for (var j = 0; j < needle.length; j++) {
+        if (haystack[i + j] != needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  static int? _parseContentLength(String headers) {
+    final re = RegExp(r'Content-Length:\s*(\d+)', caseSensitive: false);
+    final match = re.firstMatch(headers);
+    if (match != null) {
+      return int.tryParse(match.group(1)!);
+    }
+    return null;
+  }
+
+  void _trimLeadingCRLF() {
+    while (_buf.isNotEmpty && (_buf[0] == 0x0D || _buf[0] == 0x0A)) {
+      _buf.removeAt(0);
+    }
+  }
+}
+
+enum _State { seekBoundary, readHeaders, readFrame, discardToBoundary }

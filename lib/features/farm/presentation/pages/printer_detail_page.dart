@@ -3,7 +3,7 @@
 /// 显示内容:
 /// - 设备元数据卡片（SN / IP / 型号 / 固件 / Moonraker 信息）
 /// - 实时温度仪表
-/// - 摄像头实时画面（CameraView 轮询）
+/// - 摄像头实时画面（MjpegView MJPEG 长连接流）
 /// - 打印进度条 + 预估剩余时间
 /// - 事件时间线（连接 / 状态变更 / 错误）
 /// - 手动控制面板（归零 / 设置温度 / 发送 GCode）
@@ -948,7 +948,7 @@ class _CameraSection extends ConsumerStatefulWidget {
 
 class _CameraSectionState extends ConsumerState<_CameraSection> {
   bool _isActive = false;
-  String? _frameUrl;
+  String? _streamUrl;
   bool _isStarting = false;
   bool _isResolving = false;
   String? _error;
@@ -977,7 +977,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     _ipController.dispose();
     if (_isActive) {
       _isActive = false;
-      _frameUrl = null;
+      _streamUrl = null;
       _cachedCameraService?.stopMonitor(
         sn: widget.sn,
         ip: _effectiveIp.trim(),
@@ -1018,9 +1018,9 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
 
     if (!mounted) return;
 
-    if (result.success && result.frameUrl != null) {
+    if (result.success && result.streamUrl != null) {
       setState(() {
-        _frameUrl = result.frameUrl;
+        _streamUrl = result.streamUrl;
         _isActive = true;
         _isStarting = false;
       });
@@ -1033,7 +1033,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
   }
 
   Future<void> _stopCamera() async {
-    if (_frameUrl != null && _isActive) {
+    if (_streamUrl != null && _isActive) {
       await _cachedCameraService?.stopMonitor(
         sn: widget.sn,
         ip: _effectiveIp.trim(),
@@ -1043,7 +1043,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     if (mounted) {
       setState(() {
         _isActive = false;
-        _frameUrl = null;
+        _streamUrl = null;
         _error = null;
       });
     }
@@ -1202,10 +1202,13 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                 ),
               ),
 
-            if (_isActive && _frameUrl != null)
-              CameraView(
-                frameUrl: _frameUrl!,
-                isActive: _isActive,
+            if (_isActive && _streamUrl != null)
+              MjpegView(
+                url: _streamUrl!,
+                retrySeconds: 5,
+                loadingWidget: const Center(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
 
             if (!_isActive && _error == null)
