@@ -203,6 +203,9 @@ class FarmPrinterState {
 
   bool get isOnline => connectionState == FarmConnectionState.online;
 
+  /// IP 是否为有效 LAN 地址（非占位符）
+  bool get hasValidIp => ip.isNotEmpty && ip != 'MQTT' && ip != '—' && ip != 'Unknown';
+
   /// 是否正在打印（以 printState 为主，其他信号仅作缺失时的 fallback）
   bool get isPrinting {
     final state = printState?.value;

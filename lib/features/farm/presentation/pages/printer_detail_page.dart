@@ -949,6 +949,7 @@ class _CameraSection extends ConsumerStatefulWidget {
 class _CameraSectionState extends ConsumerState<_CameraSection> {
   bool _isActive = false;
   String? _streamUrl;
+  String? _frameUrl; // 降级用快照 URL
   bool _isStarting = false;
   bool _isResolving = false;
   String? _error;
@@ -978,6 +979,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     if (_isActive) {
       _isActive = false;
       _streamUrl = null;
+      _frameUrl = null;
       _cachedCameraService?.stopMonitor(
         sn: widget.sn,
         ip: _effectiveIp.trim(),
@@ -1021,6 +1023,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     if (result.success && result.streamUrl != null) {
       setState(() {
         _streamUrl = result.streamUrl;
+        _frameUrl = result.frameUrl;
         _isActive = true;
         _isStarting = false;
       });
@@ -1044,6 +1047,7 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
       setState(() {
         _isActive = false;
         _streamUrl = null;
+        _frameUrl = null;
         _error = null;
       });
     }
@@ -1205,7 +1209,9 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
             if (_isActive && _streamUrl != null)
               MjpegView(
                 url: _streamUrl!,
-                retrySeconds: 5,
+                retrySeconds: 3,
+                fallbackSnapshotUrl: _frameUrl,
+                snapshotPollInterval: const Duration(milliseconds: 100),
                 loadingWidget: const Center(
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),

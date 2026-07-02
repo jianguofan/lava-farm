@@ -75,7 +75,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
         .toList();
     // MQTT 在线但 IP 待解析（显示但不给选）
     final pendingPrinters = printers
-        .where((p) => p.isOnline && (p.ip == '—' || p.ip == 'MQTT'))
+        .where((p) => p.isOnline && !p.hasValidIp)
         .toList();
     // 离线
     final offlinePrinters = printers.where((p) => !p.isOnline).toList();
@@ -748,7 +748,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     for (final sn in _selectedSns) {
       final printer = store.getPrinter(sn);
       if (printer == null) continue;
-      if (printer.ip == '—' || printer.ip == 'MQTT' || !printer.isOnline) {
+      if (!printer.hasValidIp || !printer.isOnline) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(

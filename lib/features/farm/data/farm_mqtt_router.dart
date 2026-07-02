@@ -121,8 +121,8 @@ class FarmMqttRouter {
 
     // 启动 IP 解析定时器：每 30s 对在线但无有效 IP 的打印机重试
     _ipResolveTimer?.cancel();
-    _resolveIpsForUnknownDevices();
-    _ipResolveTimer = Timer.periodic(_ipResolveInterval, (_) => _resolveIpsForUnknownDevices());
+    resolveIpsForUnknownDevices();
+    _ipResolveTimer = Timer.periodic(_ipResolveInterval, (_) => resolveIpsForUnknownDevices());
   }
 
   /// 停止路由
@@ -202,6 +202,10 @@ class FarmMqttRouter {
   /// 全量状态（printer.objects.query）在用户点击详情时按需拉取。
   /// 心跳由 FarmConnectionMonitor 通过被动监听 +/status 消息流驱动。
   Future<void> _probeDevice(String sn) async {
+    // 已有有效 IP 则跳过
+    final printer = _store.allPrinters.where((p) => p.sn == sn).firstOrNull;
+    if (printer != null && printer.hasValidIp) return;
+
     try {
       final sysInfo = await sendCommand(sn, 'machine.system_info');
       if (sysInfo.success && sysInfo.data != null) {
@@ -468,34 +472,36 @@ class FarmMqttRouter {
     }
 
     final printer = _store.getPrinter(msg.sn);
-    if (printer != null && printer.ip == 'MQTT') {
-      _resolveIpInBackground(msg.sn);
+    if (printer != null && !printer.hasValidIp) {
+      resolveIpInBackground(msg.sn);
     }
   }
 
   /// 定期对在线但无有效 IP 的打印机重试 IP 解析
   ///
+  /// 对在线但无有效 IP 的打印机立即发起 machine.system_info 查询
+  ///
   /// 目标：MQTT 自动发现的设备初始没有 IP，需要在打印机上线后
-  /// 持续重试获取直到成功。
-  void _resolveIpsForUnknownDevices() {
+  /// 持续重试获取直到成功。UI 可在页面加载时主动调用以缩短等待时间。
+  /// 内部有去重（同一 SN 同时只发一次请求），可安全重复调用。
+  void resolveIpsForUnknownDevices() {
     for (final printer in _store.allPrinters) {
       final sn = printer.sn;
-      // 只处理：在线 + 无有效 IP（'MQTT' 或 '—'）+ 未在解析中
       if (!printer.isOnline) continue;
-      if (printer.ip != 'MQTT' && printer.ip != '—') continue;
+      if (printer.hasValidIp) continue; // 缓存命中：已有有效 IP，跳过
       if (_resolvingSns.contains(sn)) continue;
 
-      _resolveIpInBackground(sn);
+      resolveIpInBackground(sn);
     }
   }
 
-  /// 后台通过 MQTT machine.system_info 解析打印机真实 LAN IP
+  /// 通过 MQTT machine.system_info 解析打印机真实 LAN IP
   ///
   /// MQTT 通道已通，直接问设备要网络信息，无需子网扫描。
-  /// 异步执行，防止对同一台设备重复请求。
+  /// 异步 fire-and-forget，防止对同一台设备重复请求（_resolvingSns 去重）。
   final Set<String> _resolvingSns = {};
 
-  void _resolveIpInBackground(String sn) {
+  void resolveIpInBackground(String sn) {
     if (_resolvingSns.contains(sn)) return;
     _resolvingSns.add(sn);
 

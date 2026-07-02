@@ -5,21 +5,40 @@
 ///
 /// 原理:
 ///   后端持续推送 multipart/x-mixed-replace 格式的 MJPEG 流，
-///   每个 boundary 之间是一帧完整 JPEG。本 Widget 通过 http
-///   包建立长连接，逐字节解析 boundary → 提取 JPEG → Image.memory() 渲染。
+///   每个 boundary 之间是一帧完整 JPEG。本 Widget 通过 dart:io
+///   HttpClient（autoUncompress=false）建立长连接，逐字节解析
+///   boundary → 提取 JPEG 字节 → 异步解码为 ui.Image → RawImage 渲染。
+///
+/// 故障自动恢复:
+///   - Stream error / 流结束 / HTTP 非 200 / 连接异常 → retrySeconds 后重连
+///   - 连续 N 帧解码失败 → 视为流损坏，触发重连
+///   - 超过 watchdogSeconds 未收到帧 → 视为静默断流，触发重连（可设 0 禁用）
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
 class MjpegView extends StatefulWidget {
   final String url;
 
   /// 连接失败或超时后的重试间隔（秒），0 表示不重试
   final int retrySeconds;
+
+  /// 空闲超时：如果超过此时间（秒）未收到任何帧，认为流已死并重连，0 表示禁用
+  final int watchdogSeconds;
+
+  /// 降级快照 URL：MJPEG 流连续连接失败 maxStreamFailures 次后，回退到定时轮询此 URL
+  final String? fallbackSnapshotUrl;
+
+  /// 连续流连接失败 N 次后降级到轮询（需 fallbackSnapshotUrl 不为 null）
+  final int maxStreamFailures;
+
+  /// 轮询间隔（降级模式）
+  final Duration snapshotPollInterval;
 
   /// 加载中占位 Widget
   final Widget? loadingWidget;
@@ -31,6 +50,10 @@ class MjpegView extends StatefulWidget {
     super.key,
     required this.url,
     this.retrySeconds = 3,
+    this.watchdogSeconds = 5,
+    this.fallbackSnapshotUrl,
+    this.maxStreamFailures = 2,
+    this.snapshotPollInterval = const Duration(milliseconds: 200),
     this.loadingWidget,
     this.errorWidget,
   });
@@ -40,12 +63,22 @@ class MjpegView extends StatefulWidget {
 }
 
 class _MjpegViewState extends State<MjpegView> {
-  http.Client? _client;
+  HttpClient? _httpClient;
+  HttpClientResponse? _response;
   StreamSubscription<List<int>>? _subscription;
   ui.Image? _currentImage;
   String? _error;
   bool _connecting = true;
   Timer? _retryTimer;
+  Timer? _watchdogTimer;
+  int _consecutiveDecodeErrors = 0;
+  static const int _maxDecodeErrors = 3;
+
+  /// MJPEG 流连续失败次数（连接级别，不含解码错误）
+  int _streamFailureCount = 0;
+
+  /// 是否已降级到快照轮询模式
+  bool _useFallback = false;
 
   // ─── Boundary 解析状态 ─────────────────────────────────────────
   // 后端输出格式:
@@ -68,21 +101,45 @@ class _MjpegViewState extends State<MjpegView> {
   @override
   void dispose() {
     _retryTimer?.cancel();
+    _watchdogTimer?.cancel();
     _disconnect();
     _currentImage?.dispose();
     super.dispose();
   }
 
-  // ─── 连接管理 ──────────────────────────────────────────────────
+  // ─── 重连管理 ──────────────────────────────────────────────────
+
+  void _cancelRetry() {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
+  }
 
   void _disconnect() {
+    _cancelRetry();
     _subscription?.cancel();
     _subscription = null;
-    _client?.close();
-    _client = null;
+    _httpClient?.close();
+    _response = null;
+    _httpClient = null;
+  }
+
+  // ─── 看门狗 ────────────────────────────────────────────────────
+
+  void _resetWatchdog() {
+    _watchdogTimer?.cancel();
+    if (widget.watchdogSeconds > 0) {
+      _watchdogTimer = Timer(
+        Duration(seconds: widget.watchdogSeconds),
+        () => _onError('No frame for ${widget.watchdogSeconds}s'),
+      );
+    }
   }
 
   Future<void> _connect() async {
+    if (_useFallback) return; // 已降级，不再尝试 MJPEG
+
     _disconnect();
     final oldImage = _currentImage;
     _currentImage = null;
@@ -93,32 +150,49 @@ class _MjpegViewState extends State<MjpegView> {
     });
 
     try {
-      final client = http.Client();
-      final request = http.Request('GET', Uri.parse(widget.url));
-      final response = await client.send(request);
+      final client = HttpClient();
+      client.autoUncompress = false; // 关键：禁止自动 gzip 解压，确保原始字节透传
+      client.connectionTimeout = const Duration(seconds: 5);
+
+      final request = await client.getUrl(Uri.parse(widget.url));
+      final response = await request.close();
 
       if (response.statusCode != 200) {
-        final body = await response.stream.bytesToString();
-        _onError('HTTP ${response.statusCode}: $body');
+        final body = await response.transform(utf8.decoder).join();
+        final permanent = response.statusCode >= 400 && response.statusCode < 500;
+        _onError('HTTP ${response.statusCode}: $body', permanent: permanent);
         client.close();
         return;
       }
 
-      _client = client;
-      _connecting = false;
+      _httpClient = client;
+      _response = response;
+      _consecutiveDecodeErrors = 0;
+      setState(() => _connecting = false);
+      _resetWatchdog();
+      debugPrint('MjpegView: ✅ connected HTTP ${response.statusCode}, '
+          'contentType=${response.headers.contentType}, '
+          'url=${widget.url}');
+
+      var frameCount = 0;
       final parser = _MjpegParser(
         boundary: _boundary,
         headerEnd: _headerEnd,
-        onFrame: _onFrame,
+        onFrame: (jpeg) {
+          frameCount++;
+          if (frameCount == 1) {
+            debugPrint('MjpegView: 🎞️ 首帧解码: ${jpeg.length} bytes');
+          }
+          _onFrame(jpeg);
+        },
       );
 
-      _subscription = response.stream.listen(
+      _subscription = response.listen(
         parser.feed,
         onError: (e) => _onError('Stream error: $e'),
         onDone: () => _onError('Stream ended'),
         cancelOnError: false,
       );
-      // ignore: avoid_dynamic_calls
     } catch (e) {
       _onError('Connection failed: $e');
     }
@@ -143,25 +217,71 @@ class _MjpegViewState extends State<MjpegView> {
         _error = null;
       });
       oldImage?.dispose();
+
+      // 帧成功收到 + 解码成功 → 复位看门狗和错误计数
+      _consecutiveDecodeErrors = 0;
+      _streamFailureCount = 0;
+      _resetWatchdog();
     } catch (e) {
-      debugPrint('MjpegView: decode error: $e');
+      if (!mounted) return;
+      _consecutiveDecodeErrors++;
+      debugPrint('MjpegView: decode error ($_consecutiveDecodeErrors/$_maxDecodeErrors): $e');
+      if (_consecutiveDecodeErrors >= _maxDecodeErrors) {
+        _onError('Too many decode errors');
+      }
     }
   }
 
-  void _onError(String msg) {
+  void _onError(String msg, {bool permanent = false}) {
     if (!mounted) return;
-    debugPrint('MjpegView: $msg');
+    debugPrint('MjpegView: $msg${permanent ? ' (permanent)' : ''}');
+    // 立即断开旧连接并停止看门狗
+    _subscription?.cancel();
+    _subscription = null;
+    _httpClient?.close();
+    _response = null;
+    _httpClient = null;
+    _cancelRetry();
+
+    // 永久错误直接触发降级，不浪费重试机会
+    if (permanent) {
+      _streamFailureCount = widget.maxStreamFailures;
+    } else {
+      _streamFailureCount++;
+    }
+
+    // 有降级 URL 且连续失败达到阈值 → 降级到轮询
+    if (widget.fallbackSnapshotUrl != null &&
+        _streamFailureCount >= widget.maxStreamFailures) {
+      debugPrint('MjpegView: falling back to snapshot polling');
+      setState(() {
+        _useFallback = true;
+        _error = null;
+        _connecting = false;
+      });
+      return;
+    }
+
     setState(() {
       _error = msg;
       _connecting = false;
     });
-    if (widget.retrySeconds > 0) {
+    // 永久错误不重试
+    if (!permanent && widget.retrySeconds > 0) {
       _retryTimer = Timer(Duration(seconds: widget.retrySeconds), _connect);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // 降级模式：快照轮询
+    if (_useFallback && widget.fallbackSnapshotUrl != null) {
+      return _SnapshotPoller(
+        url: widget.fallbackSnapshotUrl!,
+        interval: widget.snapshotPollInterval,
+      );
+    }
+
     if (_connecting) {
       return widget.loadingWidget ??
           const Center(child: CircularProgressIndicator());
@@ -212,10 +332,18 @@ class _MjpegParser {
   })  : _boundary = boundary,
         _headerEnd = headerEnd;
 
+  bool _firstChunk = true;
+
   void feed(List<int> chunk) {
+    if (_firstChunk) {
+      debugPrint('MjpegView: 📥 首个 chunk: ${chunk.length} bytes');
+      _firstChunk = false;
+    }
     _buf.addAll(chunk);
 
+    var framesFound = 0;
     while (true) {
+      final prevState = _state;
       switch (_state) {
         case _State.seekBoundary:
           _doSeekBoundary();
@@ -352,3 +480,73 @@ class _MjpegParser {
 }
 
 enum _State { seekBoundary, readHeaders, readFrame, discardToBoundary }
+
+// ═══════════════════════════════════════════════════════════════════
+// 快照轮询器 — MJPEG 流的降级方案
+// ═══════════════════════════════════════════════════════════════════
+
+class _SnapshotPoller extends StatefulWidget {
+  final String url;
+  final Duration interval;
+
+  const _SnapshotPoller({required this.url, required this.interval});
+
+  @override
+  State<_SnapshotPoller> createState() => _SnapshotPollerState();
+}
+
+class _SnapshotPollerState extends State<_SnapshotPoller> {
+  Timer? _timer;
+  String? _currentUrl;
+  int _errorCount = 0;
+  static const int _maxErrors = 10;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetch();
+    _timer = Timer.periodic(widget.interval, (_) => _fetch());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _fetch() {
+    final url = '${widget.url}?ts=${DateTime.now().microsecondsSinceEpoch}';
+    final provider = NetworkImage(url);
+    final stream = provider.resolve(const ImageConfiguration());
+    late ImageStreamListener listener;
+    final completer = Completer<void>();
+
+    listener = ImageStreamListener(
+      (ImageInfo info, bool sync) {
+        stream.removeListener(listener);
+        if (!completer.isCompleted) completer.complete();
+        if (!mounted) return;
+        _errorCount = 0;
+        setState(() => _currentUrl = url);
+      },
+      onError: (dynamic error, StackTrace? stackTrace) {
+        stream.removeListener(listener);
+        if (!completer.isCompleted) completer.complete();
+        if (!mounted) return;
+        _errorCount++;
+      },
+    );
+    stream.addListener(listener);
+    unawaited(completer.future);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_errorCount >= _maxErrors || _currentUrl == null) {
+      return const Center(
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    return Image.network(_currentUrl!, fit: BoxFit.cover);
+  }
+}
