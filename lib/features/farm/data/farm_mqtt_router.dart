@@ -202,9 +202,9 @@ class FarmMqttRouter {
   /// 全量状态（printer.objects.query）在用户点击详情时按需拉取。
   /// 心跳由 FarmConnectionMonitor 通过被动监听 +/status 消息流驱动。
   Future<void> _probeDevice(String sn) async {
-    // 已有有效 IP 则跳过
+    // 已有有效 IP 或设备不在线则跳过
     final printer = _store.allPrinters.where((p) => p.sn == sn).firstOrNull;
-    if (printer != null && printer.hasValidIp) return;
+    if (printer == null || !printer.isOnline || printer.hasValidIp) return;
 
     try {
       final sysInfo = await sendCommand(sn, 'machine.system_info');
