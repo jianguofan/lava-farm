@@ -1,0 +1,3 @@
+[submodule "packages/agent_core"]
+	path = packages/agent_core
+	url = git@gitlab.lan.snapmaker.com:client_dev_team/agent_core.git
