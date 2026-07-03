@@ -89,13 +89,13 @@ class BedInspectionService {
     required FarmMqttRouter router,
   })  : _router = router,
         _llmProvider = LLMAdapter(
-          apiKey: 'sk-df3d817d7c83417b',
+          apiKey: 'sk-82e0b17749e74325',
           model: '',
           baseUrl:
               'http://agent-platform.s.com/api/sap/v1/run/llm/mdl_ac771085',
           completionsPath: '',
           temperature: 0.7,
-          timeout: const Duration(seconds: 30),
+          timeout: const Duration(seconds: 120),
         );
 
   /// 检测单台打印机
@@ -143,6 +143,13 @@ class BedInspectionService {
 
       // 4. 调用 LLM
       final result = await _callLLM(compressedBytes, sn);
+      if (result != null) {
+        debugPrint('[BedInspection] $sn: === 检测结果 ===');
+        debugPrint('[BedInspection] $sn: statusSummary=${result.statusSummary}');
+        debugPrint('[BedInspection] $sn: 异物: ${result.bedForeignObjects.description}');
+        debugPrint('[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
+        debugPrint('[BedInspection] $sn: 原因: ${result.printReadiness.reason}');
+      }
       return result;
     } catch (e, stack) {
       debugPrint('[BedInspection] $sn: 检测失败 — $e');
@@ -289,7 +296,7 @@ class BedInspectionService {
       debugPrint('[BedInspection] $sn: 调用 LLM…');
       final events = await _llmProvider
           .chat(messages: messages, tools: const [])
-          .timeout(const Duration(seconds: 25));
+          .timeout(const Duration(seconds: 120));
 
       // 从 events 中提取文本
       final textBuffer = StringBuffer();
@@ -300,10 +307,16 @@ class BedInspectionService {
       }
 
       final fullText = textBuffer.toString();
-      debugPrint(
-          '[BedInspection] $sn: LLM 响应 ${fullText.length} 字符');
+      debugPrint('[BedInspection] $sn: LLM 原始响应:\n$fullText');
 
-      return _parseResponse(fullText, sn);
+      final result = _parseResponse(fullText, sn);
+      if (result != null) {
+        debugPrint('[BedInspection] $sn: 解析成功 — '
+            'hasForeignObjects=${result.hasForeignObjects}, '
+            'isReady=${result.printReadiness.isReady}, '
+            'action=${result.printReadiness.recommendedActionLabel}');
+      }
+      return result;
     } catch (e, stack) {
       debugPrint('[BedInspection] $sn: LLM 调用失败 — $e');
       debugPrint('$stack');

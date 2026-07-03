@@ -989,11 +989,14 @@ Widget _buildInspectionStatusLine(BedInspectionResult? result) {
         const Icon(Icons.warning_amber_rounded, size: 12, color: Colors.red),
         const SizedBox(width: 2),
         Expanded(
-          child: Text(
-            result.bedForeignObjects.description,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 9, color: Colors.red.shade700, height: 1.3),
+          child: Tooltip(
+            message: result.bedForeignObjects.description,
+            child: Text(
+              result.bedForeignObjects.description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 9, color: Colors.red.shade700, height: 1.3),
+            ),
           ),
         ),
       ],
@@ -1018,11 +1021,14 @@ Widget _buildInspectionStatusLine(BedInspectionResult? result) {
       Icon(Icons.info_outline, size: 12, color: Colors.orange.shade600),
       const SizedBox(width: 2),
       Expanded(
-        child: Text(
-          result.printReadiness.reason,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 9, color: Colors.orange.shade700),
+        child: Tooltip(
+          message: result.printReadiness.reason,
+          child: Text(
+            result.printReadiness.reason,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 9, color: Colors.orange.shade700),
+          ),
         ),
       ),
     ],

@@ -21,6 +21,7 @@ import '../../data/farm_logger.dart';
 import '../../data/farm_command_gateway.dart';
 import '../../data/farm_connection_monitor.dart';
 import '../../data/farm_mqtt_router.dart';
+import '../../data/ip_cache_store.dart';
 import '../../data/camera_service.dart';
 import '../../data/thumbnail_service.dart';
 import '../services/farm_hub.dart';
@@ -130,7 +131,8 @@ final farmMqttRouterProvider = Provider<FarmMqttRouter?>((ref) {
 
   // 创建新 Router
   final store = ref.read(farmStoreProvider);
-  final router = FarmMqttRouter(store: store, transport: transport);
+  final ipCacheStore = ref.read(ipCacheStoreProvider);
+  final router = FarmMqttRouter(store: store, transport: transport, ipCacheStore: ipCacheStore);
   _activeRouter = router;
 
   // 异步启动（不阻塞 Provider 返回）
@@ -187,6 +189,14 @@ final brokerHealthStateProvider = Provider<BrokerHealthState>((ref) {
 // ═══════════════════════════════════════════════════════════
 
 final httpFallbackCountProvider = StateProvider<int>((ref) => 0);
+
+// ═══════════════════════════════════════════════════════════
+// IP Cache Store
+// ═══════════════════════════════════════════════════════════
+
+final ipCacheStoreProvider = Provider<IpCacheStore>((ref) {
+  return IpCacheStore();
+});
 
 // ═══════════════════════════════════════════════════════════
 // Camera Service

@@ -26,6 +26,7 @@ import 'farm_command_gateway.dart';
 import 'farm_logger.dart';
 import 'farm_printer_state.dart';
 import 'farm_store.dart';
+import 'ip_cache_store.dart';
 import 'mqtt_message_processor.dart';
 import 'printer_info.dart';
 import 'unified_request_tracker.dart';
@@ -57,6 +58,9 @@ class FarmMqttRouter {
   final Map<String, int> _ipFailures = {};
   static const int _maxIpFailures = 3;
 
+  /// IP 缓存持久化存储
+  final IpCacheStore _ipCacheStore;
+
   /// 防重入：start() 只能调用一次
   bool _started = false;
 
@@ -69,8 +73,10 @@ class FarmMqttRouter {
   FarmMqttRouter({
     required FarmStore store,
     required MqttTransportAdapter transport,
+    IpCacheStore? ipCacheStore,
   })  : _store = store,
         _transport = transport,
+        _ipCacheStore = ipCacheStore ?? IpCacheStore(),
         _tracker = UnifiedRequestTracker() {
     _gateway = FarmCommandGateway(
       tracker: _tracker,
@@ -97,6 +103,12 @@ class FarmMqttRouter {
   Future<void> start() async {
     if (_started) return;
     _started = true;
+
+    // 从本地存储恢复 IP 缓存
+    final cached = await _ipCacheStore.loadAll();
+    if (cached.isNotEmpty) {
+      ipCache.addAll(cached);
+    }
 
     // 监听所有消息（保存订阅句柄，stop 时取消）
     _messageSub = _transport.messageStream.listen(_onMessage);
@@ -497,6 +509,11 @@ class FarmMqttRouter {
     });
   }
 
+  /// 持久化 IP 缓存到本地存储（供 CameraService 等外部调用）
+  void persistIp(String sn, String ip) {
+    _ipCacheStore.update(sn, ip);
+  }
+
   /// 从 machine.system_info 响应中提取 IP 并更新到打印机状态
   ///
   /// 响应格式:
@@ -524,6 +541,7 @@ class FarmMqttRouter {
           final ip = addr['address'] as String?;
           if (ip != null && ip != '127.0.0.1') {
             ipCache[sn] = ip; // 写入缓存
+            _ipCacheStore.update(sn, ip); // 持久化到本地
             _store.updatePrinter(sn, (p) {
               p.ip = ip;
               return p;

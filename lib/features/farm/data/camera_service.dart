@@ -19,8 +19,8 @@ import 'farm_mqtt_router.dart';
 
 class CameraStartResult {
   final bool success;
-  final String? frameUrl;   // 快照 URL（轮询方案，已废弃，保留兼容）
-  final String? streamUrl;  // MJPEG 流 URL（长连接方案）
+  final String? frameUrl; // 快照 URL（轮询方案，已废弃，保留兼容）
+  final String? streamUrl; // MJPEG 流 URL（长连接方案）
   final String? error;
 
   const CameraStartResult({
@@ -79,7 +79,8 @@ class CameraService {
     final frameUrl = _buildFrameUrl(ip, port);
     final streamUrl = _buildStreamUrl(ip, port);
     debugPrint('[CameraService] $sn: 帧 URL = $frameUrl, 流 URL = $streamUrl');
-    return CameraStartResult(success: true, frameUrl: frameUrl, streamUrl: streamUrl);
+    return CameraStartResult(
+        success: true, frameUrl: frameUrl, streamUrl: streamUrl);
   }
 
   /// 停止摄像头
@@ -101,7 +102,7 @@ class CameraService {
       },
     ));
 
-    _activeMonitors.remove(sn);
+    // _activeMonitors.remove(sn);
   }
 
   /// 构造帧图片 URL（LAN 模式，来自 lava_app 实现）
@@ -140,6 +141,7 @@ class CameraService {
             final ip = addr['address'] as String?;
             if (ip != null && ip != '127.0.0.1') {
               _router.ipCache[sn] = ip; // 同步更新缓存
+              _router.persistIp(sn, ip); // 持久化到本地
               return ip;
             }
           }

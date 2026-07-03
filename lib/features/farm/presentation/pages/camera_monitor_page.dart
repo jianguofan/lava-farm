@@ -1,12 +1,10 @@
 /// CameraMonitorPage — 多设备摄像头集中监控页面
 ///
 /// 一键开启所有在线设备的摄像头，网格布局同时显示多路视频流。
-/// 每张卡片叠加设备名称和 IP，支持 MJPEG 优先、快照轮询降级。
-///
-/// 用法:
-///   Navigator.push(context, MaterialPageRoute(
-///     builder: (_) => const CameraMonitorPage(),
-///   ));
+/// 每张卡片叠加设备名称和 IP，定时轮询 server/files/camera/monitor.jpg。
+
+import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -16,7 +14,6 @@ import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../data/camera_service.dart';
 import '../../data/farm_printer_state.dart';
-import '../widgets/camera_view.dart';
 
 class CameraMonitorPage extends ConsumerStatefulWidget {
   const CameraMonitorPage({super.key});
@@ -26,9 +23,8 @@ class CameraMonitorPage extends ConsumerStatefulWidget {
 }
 
 class _CameraStreamInfo {
-  final String streamUrl;
   final String frameUrl;
-  _CameraStreamInfo({required this.streamUrl, required this.frameUrl});
+  _CameraStreamInfo({required this.frameUrl});
 }
 
 class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
@@ -121,11 +117,10 @@ class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
           ip: p.ip,
           port: p.port,
         );
-        debugPrint('[CameraMonitor] startMonitor ← ${p.sn}: success=${result.success}, streamUrl=${result.streamUrl != null}');
-        if (result.success && result.streamUrl != null) {
+        debugPrint('[CameraMonitor] startMonitor ← ${p.sn}: success=${result.success}, frameUrl=${result.frameUrl != null}');
+        if (result.success && result.frameUrl != null) {
           _cameraUrls[p.sn] = _CameraStreamInfo(
-            streamUrl: result.streamUrl!,
-            frameUrl: result.frameUrl ?? '',
+            frameUrl: result.frameUrl!,
           );
         }
         return result;
@@ -179,11 +174,10 @@ class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
       port: device.port,
     );
     if (_disposed || !mounted) return;
-    if (result.success && result.streamUrl != null) {
+    if (result.success && result.frameUrl != null) {
       setState(() {
         _cameraUrls[sn] = _CameraStreamInfo(
-          streamUrl: result.streamUrl!,
-          frameUrl: result.frameUrl ?? '',
+          frameUrl: result.frameUrl!,
         );
         _closedSns.remove(sn);
       });
@@ -316,7 +310,6 @@ class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
             return _CameraFeedCard(
               label: _deviceLabel(device),
               ip: device.ip,
-              streamUrl: closed ? null : urls?.streamUrl,
               frameUrl: closed ? null : urls?.frameUrl,
               closed: closed,
               onClose: urls != null
@@ -337,10 +330,9 @@ class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
 // 摄像头卡片
 // ═══════════════════════════════════════════════════════════════════
 
-class _CameraFeedCard extends StatelessWidget {
+class _CameraFeedCard extends StatefulWidget {
   final String label;
   final String ip;
-  final String? streamUrl;
   final String? frameUrl;
   final bool closed;
   final VoidCallback? onClose;
@@ -349,12 +341,148 @@ class _CameraFeedCard extends StatelessWidget {
   const _CameraFeedCard({
     required this.label,
     required this.ip,
-    this.streamUrl,
     this.frameUrl,
     this.closed = false,
     this.onClose,
     this.onReopen,
   });
+
+  @override
+  State<_CameraFeedCard> createState() => _CameraFeedCardState();
+}
+
+class _CameraFeedCardState extends State<_CameraFeedCard> {
+  Timer? _pollTimer;
+
+  // 双缓冲
+  Uint8List? _bufferA;
+  Uint8List? _bufferB;
+  bool _showBufferA = true;
+  bool _isLoadingFrame = false;
+  final HttpClient _frameHttpClient = HttpClient();
+
+  String? get _frameUrl => widget.frameUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_frameUrl != null) _startPolling();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CameraFeedCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.frameUrl != oldWidget.frameUrl) {
+      if (widget.frameUrl != null) {
+        _startPolling();
+      } else {
+        _stopPolling();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _stopPolling();
+    _frameHttpClient.close();
+    super.dispose();
+  }
+
+  void _startPolling() {
+    _stopPolling();
+    _bufferA = null;
+    _bufferB = null;
+    _showBufferA = true;
+    _isLoadingFrame = false;
+
+    // 立即拉第一帧，之后每 500ms 拉一帧（双缓冲）
+    _fetchNextFrame();
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      _fetchNextFrame();
+    });
+  }
+
+  void _stopPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _isLoadingFrame = false;
+    _bufferA = null;
+    _bufferB = null;
+  }
+
+  Future<void> _fetchNextFrame() async {
+    if (_frameUrl == null || _isLoadingFrame) return;
+
+    _isLoadingFrame = true;
+    final loadIntoA = !_showBufferA;
+
+    try {
+      final uri = Uri.parse(_frameUrl!);
+      final request = await _frameHttpClient.getUrl(uri);
+      request.headers.set('Accept', 'image/jpeg, image/png, image/*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+
+      if (response.statusCode != 200) {
+        if (mounted) setState(() => _isLoadingFrame = false);
+        return;
+      }
+
+      final bytes = await response.fold<List<int>>(
+        <int>[],
+        (prev, chunk) => prev..addAll(chunk),
+      );
+
+      if (!mounted) return;
+      if (_frameUrl == null) {
+        _isLoadingFrame = false;
+        return;
+      }
+
+      final imageData = Uint8List.fromList(bytes);
+      setState(() {
+        if (loadIntoA) {
+          _bufferA = imageData;
+        } else {
+          _bufferB = imageData;
+        }
+        _showBufferA = loadIntoA;
+        _isLoadingFrame = false;
+      });
+    } catch (e) {
+      debugPrint('[CameraFeed] 帧下载失败: $e');
+      if (mounted) {
+        setState(() => _isLoadingFrame = false);
+      }
+    }
+  }
+
+  Widget _buildCameraFrame() {
+    final currentImage = _showBufferA ? _bufferA : _bufferB;
+
+    if (currentImage != null) {
+      return Image.memory(
+        currentImage,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        errorBuilder: (context, error, stackTrace) => Container(
+          color: Colors.grey.shade200,
+          child: const Center(
+            child: Icon(Icons.broken_image, size: 32, color: Colors.grey),
+          ),
+        ),
+      );
+    }
+
+    // 首帧加载中
+    return Container(
+      color: Colors.grey.shade200,
+      child: const Center(
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -365,7 +493,7 @@ class _CameraFeedCard extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           // 已关闭状态
-          if (closed)
+          if (widget.closed)
             Container(
               color: Colors.grey.shade900,
               child: Center(
@@ -377,9 +505,9 @@ class _CameraFeedCard extends StatelessWidget {
                     const Text('已关闭',
                         style: TextStyle(color: Colors.white38, fontSize: 12)),
                     const SizedBox(height: 10),
-                    if (onReopen != null)
+                    if (widget.onReopen != null)
                       TextButton.icon(
-                        onPressed: onReopen,
+                        onPressed: widget.onReopen,
                         icon: const Icon(Icons.play_arrow, size: 16),
                         label: const Text('重新开启', style: TextStyle(fontSize: 11)),
                         style: TextButton.styleFrom(foregroundColor: Colors.white70),
@@ -388,16 +516,9 @@ class _CameraFeedCard extends StatelessWidget {
                 ),
               ),
             )
-          // 视频流
-          else if (streamUrl != null)
-            MjpegView(
-              url: streamUrl!,
-              retrySeconds: 5,
-              watchdogSeconds: 8,
-              fallbackSnapshotUrl: frameUrl,
-              maxStreamFailures: 2,
-              snapshotPollInterval: const Duration(milliseconds: 100),
-            )
+          // 双缓冲帧显示（500ms 刷新，无闪烁）
+          else if (_frameUrl != null)
+            _buildCameraFrame()
           else
             Container(
               color: Colors.grey.shade200,
@@ -426,14 +547,14 @@ class _CameraFeedCard extends StatelessWidget {
               child: Row(
                 children: [
                   Icon(
-                    closed ? Icons.videocam_off : Icons.videocam,
+                    widget.closed ? Icons.videocam_off : Icons.videocam,
                     size: 14,
                     color: Colors.white70,
                   ),
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
-                      label,
+                      widget.label,
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 12,
@@ -449,7 +570,7 @@ class _CameraFeedCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
-                      ip,
+                      widget.ip,
                       style: const TextStyle(
                         color: Colors.white70,
                         fontSize: 10,
@@ -463,12 +584,12 @@ class _CameraFeedCard extends StatelessWidget {
           ),
 
           // 关闭按钮（右上角，非关闭状态下显示）
-          if (!closed && onClose != null)
+          if (!widget.closed && widget.onClose != null)
             Positioned(
               top: 4,
               right: 4,
               child: GestureDetector(
-                onTap: onClose,
+                onTap: widget.onClose,
                 child: Container(
                   width: 22,
                   height: 22,

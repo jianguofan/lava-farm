@@ -3,23 +3,26 @@
 /// 显示内容:
 /// - 设备元数据卡片（SN / IP / 型号 / 固件 / Moonraker 信息）
 /// - 实时温度仪表
-/// - 摄像头实时画面（MjpegView MJPEG 长连接流）
+/// - 摄像头实时画面（定时轮询 server/files/camera/monitor.jpg）
 /// - 打印进度条 + 预估剩余时间
 /// - 事件时间线（连接 / 状态变更 / 错误）
 /// - 手动控制面板（归零 / 设置温度 / 发送 GCode）
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
+import '../../application/providers/bed_inspection_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/camera_service.dart';
 import '../../data/printer_discovery.dart';
 import '../../data/printer_info.dart';
-import '../widgets/camera_view.dart';
+import '../../domain/models/bed_inspection_result.dart';
 import '../widgets/thumbnail_image.dart';
 import '../widgets/print_section.dart';
 
@@ -37,10 +40,11 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
   @override
   void initState() {
     super.initState();
-    // 进入详情 → 按需拉取全量状态
+    // 进入详情 → 按需拉取全量状态 + 自动 AI 床板检测
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final router = ref.read(farmMqttRouterProvider);
       router?.fetchFullState(widget.sn);
+      ref.read(bedInspectionResultsProvider.notifier).inspectOne(widget.sn);
     });
   }
 
@@ -49,6 +53,8 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
     // 监听 FarmStore 版本号 + 读取该打印机状态
     ref.watch(farmStoreVersionProvider);
     final printer = ref.read(farmStoreProvider).getPrinter(widget.sn);
+    final inspectionResult = ref.watch(bedInspectionResultProvider(widget.sn));
+    final isInspecting = ref.watch(bedInspectionLoadingProvider);
 
     if (printer == null) {
       return Scaffold(
@@ -92,6 +98,18 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
                 port: printer.port,
               ),
             if (printer.isOnline) const SizedBox(height: 16),
+
+            // ── 区块 2.5: 床板 AI 异物检测 ──
+            if (printer.isOnline) ...[
+              _InspectionCard(
+                result: inspectionResult,
+                isInspecting: isInspecting,
+                onRefresh: () {
+                  ref.read(bedInspectionResultsProvider.notifier).inspectOne(widget.sn);
+                },
+              ),
+              if (inspectionResult != null || isInspecting) const SizedBox(height: 16),
+            ],
 
             // ── 区块 3: 温度仪表 ──
             _TemperatureSection(printer: printer),
@@ -948,11 +966,18 @@ class _CameraSection extends ConsumerStatefulWidget {
 
 class _CameraSectionState extends ConsumerState<_CameraSection> {
   bool _isActive = false;
-  String? _streamUrl;
-  String? _frameUrl; // 降级用快照 URL
+  String? _frameUrl; // 轮询快照 URL
   bool _isStarting = false;
   bool _isResolving = false;
   String? _error;
+  Timer? _pollTimer;
+
+  // 双缓冲：始终显示 front buffer，back buffer 静默加载下一帧
+  Uint8List? _bufferA;
+  Uint8List? _bufferB;
+  bool _showBufferA = true;
+  bool _isLoadingFrame = false;
+  final HttpClient _frameHttpClient = HttpClient();
 
   /// 可用作摄像头 HTTP 请求的真实 IP（覆盖占位符如 'MQTT'）
   late String _effectiveIp;
@@ -976,9 +1001,13 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
   @override
   void dispose() {
     _ipController.dispose();
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _frameHttpClient.close();
+    _bufferA = null;
+    _bufferB = null;
     if (_isActive) {
       _isActive = false;
-      _streamUrl = null;
       _frameUrl = null;
       _cachedCameraService?.stopMonitor(
         sn: widget.sn,
@@ -1020,12 +1049,23 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
 
     if (!mounted) return;
 
-    if (result.success && result.streamUrl != null) {
+    if (result.success && result.frameUrl != null) {
+      // 重置双缓冲
+      _bufferA = null;
+      _bufferB = null;
+      _showBufferA = true;
+      _isLoadingFrame = false;
+
       setState(() {
-        _streamUrl = result.streamUrl;
         _frameUrl = result.frameUrl;
         _isActive = true;
         _isStarting = false;
+      });
+
+      // 立即拉第一帧，之后每 500ms 拉一帧（双缓冲，无闪烁）
+      _fetchNextFrame();
+      _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        _fetchNextFrame();
       });
     } else {
       setState(() {
@@ -1035,8 +1075,62 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     }
   }
 
+  /// 下载下一帧到隐藏 buffer，加载完成后交换显示
+  Future<void> _fetchNextFrame() async {
+    if (!_isActive || _frameUrl == null || _isLoadingFrame) return;
+
+    _isLoadingFrame = true;
+    final loadIntoA = !_showBufferA; // 加载到当前隐藏的 buffer
+
+    try {
+      final uri = Uri.parse(_frameUrl!);
+      final request = await _frameHttpClient.getUrl(uri);
+      request.headers.set('Accept', 'image/jpeg, image/png, image/*');
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+
+      if (response.statusCode != 200) {
+        if (mounted) {
+          setState(() => _isLoadingFrame = false);
+        }
+        return;
+      }
+
+      final bytes = await response.fold<List<int>>(
+        <int>[],
+        (prev, chunk) => prev..addAll(chunk),
+      );
+
+      if (!mounted) return;
+      if (!_isActive) {
+        _isLoadingFrame = false;
+        return;
+      }
+
+      final imageData = Uint8List.fromList(bytes);
+      setState(() {
+        if (loadIntoA) {
+          _bufferA = imageData;
+        } else {
+          _bufferB = imageData;
+        }
+        _showBufferA = loadIntoA; // 交换：显示刚加载完的 buffer
+        _isLoadingFrame = false;
+      });
+    } catch (e) {
+      debugPrint('[CameraSection] 帧下载失败: $e');
+      if (mounted) {
+        setState(() => _isLoadingFrame = false);
+      }
+    }
+  }
+
   Future<void> _stopCamera() async {
-    if (_streamUrl != null && _isActive) {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _isLoadingFrame = false;
+    if (_isActive) {
       await _cachedCameraService?.stopMonitor(
         sn: widget.sn,
         ip: _effectiveIp.trim(),
@@ -1046,11 +1140,52 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     if (mounted) {
       setState(() {
         _isActive = false;
-        _streamUrl = null;
         _frameUrl = null;
+        _bufferA = null;
+        _bufferB = null;
         _error = null;
       });
     }
+  }
+
+  /// 双缓冲摄像头画面显示
+  ///
+  /// 始终显示 front buffer（已加载完的帧），后台静默加载下一帧到 back buffer，
+  /// 加载完成后交换，消除 Image.network 的闪烁问题。
+  Widget _buildCameraFrame() {
+    final currentImage = _showBufferA ? _bufferA : _bufferB;
+
+    if (currentImage != null) {
+      return Image.memory(
+        currentImage,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        errorBuilder: (context, error, stackTrace) => Container(
+          height: 240,
+          color: Colors.grey.shade100,
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.broken_image, size: 40, color: Colors.grey.shade400),
+                const SizedBox(height: 8),
+                Text('无法加载摄像头画面',
+                    style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 首帧尚未加载完成，显示 loading
+    return Container(
+      height: 240,
+      color: Colors.grey.shade100,
+      child: const Center(
+        child: CircularProgressIndicator(strokeWidth: 2),
+      ),
+    );
   }
 
   /// 解析打印机真实 LAN IP
@@ -1206,15 +1341,10 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                 ),
               ),
 
-            if (_isActive && _streamUrl != null)
-              MjpegView(
-                url: _streamUrl!,
-                retrySeconds: 3,
-                fallbackSnapshotUrl: _frameUrl,
-                snapshotPollInterval: const Duration(milliseconds: 100),
-                loadingWidget: const Center(
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
+            if (_isActive && _frameUrl != null)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: _buildCameraFrame(),
               ),
 
             if (!_isActive && _error == null)
@@ -1238,6 +1368,245 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 床板 AI 异物检测卡片
+// ═══════════════════════════════════════════════════════════════
+
+class _InspectionCard extends StatelessWidget {
+  final BedInspectionResult? result;
+  final bool isInspecting;
+  final VoidCallback onRefresh;
+
+  const _InspectionCard({
+    this.result,
+    required this.isInspecting,
+    required this.onRefresh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // 无结果且不在检测中 → 不显示
+    if (result == null && !isInspecting) return const SizedBox.shrink();
+
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: _borderColor,
+          width: 1.5,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 标题行
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(_statusIcon, size: 20, color: _statusColor),
+                    const SizedBox(width: 6),
+                    Text(
+                      'AI 床板检测',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: _statusColor,
+                      ),
+                    ),
+                  ],
+                ),
+                // 刷新按钮
+                InkWell(
+                  onTap: isInspecting ? null : onRefresh,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: isInspecting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(Icons.refresh, size: 18, color: Colors.grey.shade600),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+
+            // 内容区
+            if (isInspecting && result == null) ...[
+              _buildSkeleton(),
+            ] else if (result != null) ...[
+              _buildResult(result!),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color get _borderColor {
+    if (isInspecting && result == null) return Colors.grey.shade300;
+    if (result == null) return Colors.grey.shade300;
+    if (result!.hasForeignObjects) return Colors.red.shade300;
+    return Colors.green.shade300;
+  }
+
+  Color get _statusColor {
+    if (isInspecting && result == null) return Colors.grey;
+    if (result == null) return Colors.grey;
+    if (result!.hasForeignObjects) return Colors.red;
+    return Colors.green;
+  }
+
+  IconData get _statusIcon {
+    if (isInspecting && result == null) return Icons.search;
+    if (result == null) return Icons.help_outline;
+    if (result!.hasForeignObjects) return Icons.warning_amber_rounded;
+    if (result!.printReadiness.caution) return Icons.check_circle_outline;
+    return Icons.check_circle;
+  }
+
+  Widget _buildSkeleton() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          height: 14,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          height: 14,
+          width: 200,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          'AI 正在分析床板照片，检测是否有异物…',
+          style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildResult(BedInspectionResult r) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 异物状态
+        if (r.hasForeignObjects) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.red.shade50,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '⚠ 检测到异物',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.red.shade700,
+                    fontSize: 14,
+                  ),
+                ),
+                if (r.bedForeignObjects.description.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    r.bedForeignObjects.description,
+                    style: TextStyle(
+                      color: Colors.red.shade700,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ] else ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.green.shade50,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.check_circle, size: 18, color: Colors.green.shade700),
+                const SizedBox(width: 6),
+                Text(
+                  r.printReadiness.caution ? '床板基本干净（注意）' : '床板干净',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.green.shade700,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+
+        // 就绪判断
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _buildBadge(r.printReadiness.recommendedActionLabel),
+            const SizedBox(width: 8),
+            if (r.printReadiness.reason.isNotEmpty)
+              Expanded(
+                child: Tooltip(
+                  message: r.printReadiness.reason,
+                  child: Text(
+                    r.printReadiness.reason,
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBadge(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.blue.shade200),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: Colors.blue.shade700,
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
         ),
       ),
     );
