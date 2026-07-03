@@ -61,7 +61,8 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
 
             if (_errorMessage != null) ...[
               const SizedBox(height: 12),
-              Text(_errorMessage!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+              Text(_errorMessage!,
+                  style: const TextStyle(color: Colors.red, fontSize: 13)),
             ],
           ],
         ),
@@ -110,7 +111,9 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
-                      color: isConnected ? Colors.green.shade800 : Colors.grey.shade700,
+                      color: isConnected
+                          ? Colors.green.shade800
+                          : Colors.grey.shade700,
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -193,8 +196,10 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
                 onPressed: (_isBusy || isConnected) ? null : _connectToBroker,
                 icon: _isBusy
                     ? const SizedBox(
-                        width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
                       )
                     : const Icon(Icons.link),
                 label: Text(_isBusy ? '连接中...' : '连接'),
@@ -244,7 +249,10 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
     try {
       final manager = ref.read(brokerConnMgrProvider);
       await manager.connect(
-        host: host, port: port, username: username, password: password,
+        host: host,
+        port: port,
+        username: username,
+        password: password,
       );
 
       // MQTT 已连接 → Router 由 farmMqttRouterProvider 自动创建并 start()
@@ -269,20 +277,23 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
   }
 
   void _registerDemoDevices(FarmStore store) {
+    // const demoDevices = [
+    //   ('8110026042710299B378', '切片工程-01', 'slicing'),
+    //   ('81100260503102537008', '切片工程-02', 'slicing'),
+    //   ('8110026050310266IC73', '切片工程-03', 'slicing'),
+    //   ('81100260503003514ZB5', '切片工程-04', 'slicing'),
+    //   ('8110026050310190EKV9', 'web全栈-01', 'web'),
+    //   ('8110026050310268AUFG', 'web全栈-02', 'web'),
+    //   ('8110025060100049IXMZ', '服务端运维-01', 'backend'),
+    //   ('8110025070800048LD98', '服务端运维-02', 'backend'),
+    //   ('8110025070800069BU7J', '客户端-01', 'client'),
+    //   ('811002605310262H7H8', '客户端-02', 'client'),
+    //   ('8110026050300191X4HB', '测试-01', 'test'),
+    // ];
     const demoDevices = [
-      ('8110026042710299B378', '切片工程-01', 'slicing'),
-      ('81100260503102537008', '切片工程-02', 'slicing'),
-      ('8110026050310266IC73', '切片工程-03', 'slicing'),
-      ('81100260503003514ZB5', '切片工程-04', 'slicing'),
-      ('8110026050310190EKV9', 'web全栈-01', 'web'),
-      ('8110026050310268AUFG', 'web全栈-02', 'web'),
-      ('8110025060100049IXMZ', '服务端运维-01', 'backend'),
-      ('8110025070800048LD98', '服务端运维-02', 'backend'),
       ('8110025070800069BU7J', '客户端-01', 'client'),
       ('811002605310262H7H8', '客户端-02', 'client'),
-      ('8110026050300191X4HB', '测试-01', 'test'),
     ];
-
     for (final (sn, name, group) in demoDevices) {
       if (store.getPrinter(sn) == null) {
         store.onPrinterRegistered(PrinterInfo(

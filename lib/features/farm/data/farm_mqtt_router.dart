@@ -162,15 +162,18 @@ class FarmMqttRouter {
   /// 向指定打印机发送 JSON-RPC 命令（MQTT 通道）
   ///
   /// 返回 [CommandResult]，超时或失败时 success=false。
+  /// [bypassQueue] 为 true 时跳过全局并发限制（用于急停等紧急命令）。
   Future<CommandResult> sendCommand(
     String sn,
     String method, [
     Map<String, dynamic>? params,
+    bool bypassQueue = false,
   ]) {
     return _gateway.sendToOne(
       sn: sn,
       method: method,
       params: params,
+      bypassQueue: bypassQueue,
     );
   }
 

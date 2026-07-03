@@ -72,17 +72,9 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
 
   void _registerDemoDevices(FarmStore store) {
     const demoDevices = [
-      ('8110025060100056K296', '切片工程-01', 'slicing'),
-      ('81100260503102537008', '切片工程-02', 'slicing'),
-      ('8110026050310266IC73', '切片工程-03', 'slicing'),
-      ('81100260503003514ZB5', '切片工程-04', 'slicing'),
-      ('8110026050310190EKV9', 'web全栈-01', 'web'),
-      ('8110026050310268AUFG', 'web全栈-02', 'web'),
-      ('8110025060100049IXMZ', '服务端运维-01', 'backend'),
-      ('8110025070800048LD98', '服务端运维-02', 'backend'),
+      ('8110026050310262H7H8', '客户端-02', 'client'),
       ('8110025070800069BU7J', '客户端-01', 'client'),
-      ('811002605310262H7H8', '客户端-02', 'client'),
-      ('8110026050300191X4HB', '测试-01', 'test'),
+      ('8110026061510231Z7AM', '客户端-03', 'client'),
     ];
 
     for (final (sn, name, group) in demoDevices) {
@@ -156,8 +148,9 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           Expanded(
             child: PrinterGrid(
               selectedSns: _selectedSns,
-              onSelectionChanged: (updated) =>
-                  setState(() => _selectedSns..clear()..addAll(updated)),
+              onSelectionChanged: (updated) => setState(() => _selectedSns
+                ..clear()
+                ..addAll(updated)),
               onPrinterTap: (sn) => _openPrinterDetail(context, sn),
               onPrinterLongPress: (sn) {
                 // 长按进入多选，已在 PrinterGrid 内部处理
@@ -207,7 +200,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
             count: stats.printing,
             color: Colors.blue,
             isActive: _activeFilter == _PrinterFilter.printing,
-            onTap: () => setState(() => _activeFilter = _PrinterFilter.printing),
+            onTap: () =>
+                setState(() => _activeFilter = _PrinterFilter.printing),
           ),
           const SizedBox(width: 6),
           _FilterChip(
@@ -239,7 +233,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
   }
 
   /// 处理批量操作
-  Future<void> _handleBatchAction(BuildContext context, BatchAction action) async {
+  Future<void> _handleBatchAction(
+      BuildContext context, BatchAction action) async {
     final sns = _selectedSns.toList();
     if (sns.isEmpty && action != BatchAction.emergencyStop) return;
 
@@ -257,7 +252,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
         _showBatchResult(context, '取消', results);
         break;
       case BatchAction.emergencyStop:
-        final allSns = ref.read(farmStoreProvider).allPrinters.map((p) => p.sn).toList();
+        final allSns =
+            ref.read(farmStoreProvider).allPrinters.map((p) => p.sn).toList();
         if (allSns.isEmpty) return;
         _showSnackBar(context, '正在急停所有打印机...', isError: true);
         final results = await operator.batchEmergencyStop();
@@ -277,12 +273,12 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
     setState(() => _selectedSns.clear());
   }
 
-  void _showBatchResult(BuildContext context, String action, List<BatchResult> results) {
+  void _showBatchResult(
+      BuildContext context, String action, List<BatchResult> results) {
     final ok = results.where((r) => r.success).length;
     final fail = results.where((r) => !r.success).length;
-    final msg = fail > 0
-        ? '$action完成: $ok 成功, $fail 失败'
-        : '$action完成: 全部 $ok 台成功';
+    final msg =
+        fail > 0 ? '$action完成: $ok 成功, $fail 失败' : '$action完成: 全部 $ok 台成功';
     _showSnackBar(context, msg, isError: fail > 0);
   }
 
@@ -302,15 +298,18 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
             onPressed: () async {
               final temp = double.tryParse(controller.text);
               if (temp == null) return;
               Navigator.pop(ctx);
-              _showSnackBar(context, '正在设置 ${sns.length} 台打印机温度为 ${temp.toInt()}°C...');
+              _showSnackBar(
+                  context, '正在设置 ${sns.length} 台打印机温度为 ${temp.toInt()}°C...');
               final results = await operator.batchSetNozzleTemp(
-                printerSns: sns, temp: temp,
+                printerSns: sns,
+                temp: temp,
               );
               _showBatchResult(context, '设置温度', results);
               if (mounted) setState(() => _selectedSns.clear());
@@ -339,7 +338,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
             onPressed: () async {
               final gcode = controller.text.trim();
@@ -347,7 +347,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
               Navigator.pop(ctx);
               _showSnackBar(context, '正在发送 GCode 到 ${sns.length} 台打印机...');
               final results = await operator.batchGcode(
-                printerSns: sns, gcode: gcode,
+                printerSns: sns,
+                gcode: gcode,
               );
               _showBatchResult(context, 'GCode', results);
               if (mounted) setState(() => _selectedSns.clear());
@@ -388,7 +389,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
     );
   }
 
-  void _showSnackBar(BuildContext context, String message, {bool isError = false}) {
+  void _showSnackBar(BuildContext context, String message,
+      {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -423,7 +425,8 @@ class _FilterChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: isActive ? effectiveColor.withOpacity(0.15) : Colors.transparent,
+          color:
+              isActive ? effectiveColor.withOpacity(0.15) : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: isActive ? effectiveColor : Colors.grey.shade300,
@@ -445,7 +448,9 @@ class _FilterChip extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
               decoration: BoxDecoration(
-                color: isActive ? effectiveColor.withOpacity(0.2) : Colors.grey.shade100,
+                color: isActive
+                    ? effectiveColor.withOpacity(0.2)
+                    : Colors.grey.shade100,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Text(

@@ -198,6 +198,15 @@ class FarmCommandGateway {
   /// 急停并发数
   static const int highPriorityConcurrency = 40;
 
+  /// 全局 MQTT 请求并发上限
+  ///
+  /// 所有 sendToOne 调用共享此信号量，防止 50+ 设备同时发送 MQTT 消息
+  /// 导致 Broker 过载和响应风暴。启动探活、IP 解析、状态查询等路径均受此限制。
+  static const int defaultGlobalMaxConcurrency = 10;
+
+  final _Semaphore _globalSemaphore =
+      _Semaphore(defaultGlobalMaxConcurrency);
+
   FarmCommandGateway({
     required UnifiedRequestTracker tracker,
     required MqttTransportAdapter transport,
@@ -214,34 +223,44 @@ class FarmCommandGateway {
   /// 向一台打印机发送 JSON-RPC 命令
   ///
   /// 返回 [CommandResult]，超时或失败时 success=false。
+  ///
+  /// [bypassQueue] 为 true 时跳过全局并发限制（用于急停等紧急命令）。
   Future<CommandResult> sendToOne({
     required String sn,
     required String method,
     Map<String, dynamic>? params,
     Duration timeout = defaultRequestTimeout,
+    bool bypassQueue = false,
   }) async {
     final startTime = DateTime.now();
     final requestId = _tracker.generateRequestId();
 
-    final future = _tracker.track(sn, requestId, method, timeout: timeout);
+    // 全局并发控制：防止 50+ 设备同时发送 MQTT 消息
+    if (!bypassQueue) await _globalSemaphore.acquire();
 
-    await _ensureResponseSubscribed(sn);
-    await _publishRequest(sn, requestId, method, params);
+    try {
+      final future = _tracker.track(sn, requestId, method, timeout: timeout);
 
-    final response = await future;
-    final duration = DateTime.now().difference(startTime);
+      await _ensureResponseSubscribed(sn);
+      await _publishRequest(sn, requestId, method, params);
 
-    final timeoutDetail = response == null
-        ? '等待 $sn/response 超时 (requestId=$requestId, topic=$sn/request → $sn/response)'
-        : null;
+      final response = await future;
+      final duration = DateTime.now().difference(startTime);
 
-    return CommandResult.fromResponse(
-      sn,
-      method,
-      duration,
-      response,
-      timeoutDetail: timeoutDetail,
-    );
+      final timeoutDetail = response == null
+          ? '等待 $sn/response 超时 (requestId=$requestId, topic=$sn/request → $sn/response)'
+          : null;
+
+      return CommandResult.fromResponse(
+        sn,
+        method,
+        duration,
+        response,
+        timeoutDetail: timeoutDetail,
+      );
+    } finally {
+      if (!bypassQueue) _globalSemaphore.release();
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
