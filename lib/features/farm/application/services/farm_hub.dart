@@ -11,6 +11,7 @@
 import 'dart:async';
 
 import '../../data/broker_connection_manager.dart';
+import '../../data/broker_user_manager.dart';
 import '../../data/config_push_service.dart';
 import '../../data/credential_store.dart';
 import '../../data/farm_connection_monitor.dart';
@@ -29,6 +30,7 @@ class FarmHub {
   // 运行时组件（start 后初始化）
   FarmConnectionMonitor? connectionMonitor;
   BrokerHealthMonitor? brokerHealthMonitor;
+  BrokerUserManager? _brokerUserMgr;
   Timer? _upgradeTimer;
 
   /// 当前 Broker 连接配置
@@ -59,6 +61,13 @@ class FarmHub {
       password: brokerConfig.password,
     );
 
+    // 1.5 初始化 Broker 用户管理器（Dynamic Security API）
+    final transport = brokerConnMgr.transport;
+    if (transport != null) {
+      _brokerUserMgr = BrokerUserManager(transport: transport);
+      await _brokerUserMgr!.init();
+    }
+
     // 2. 启动连接监控（被动心跳 — 靠 MQTT 消息流驱动）
     connectionMonitor = FarmConnectionMonitor(
       onForceOffline: (sn, reason) => store.forceOffline(sn, reason),
@@ -82,6 +91,8 @@ class FarmHub {
     _upgradeTimer?.cancel();
     connectionMonitor?.stop();
     brokerHealthMonitor?.stop();
+    _brokerUserMgr?.dispose();
+    _brokerUserMgr = null;
     await brokerConnMgr.disconnect();
   }
 
@@ -141,6 +152,19 @@ class FarmHub {
         password: mqttPassword,
       );
 
+      // Step 4.5: 在 Broker 上创建打印机用户（Dynamic Security）
+      // 必须在推送配置之前执行，否则打印机连接时 Broker 不认凭据
+      if (_brokerUserMgr != null) {
+        final userResult = await _brokerUserMgr!.createPrinterUser(
+          sn: sn,
+          password: mqttPassword,
+        );
+        if (!userResult.success) {
+          print('[FarmHub] ⚠️ 创建 Broker 用户失败: ${userResult.error}，继续尝试入网...');
+          // 不阻断入网流程 — 用户可能已存在（重试场景）
+        }
+      }
+
       // Step 5: 推送配置
       final mqttConfig = MqttConfig(
         brokerAddress: effectiveConfig.host,
@@ -179,6 +203,18 @@ class FarmHub {
   void removePrinter(String sn) {
     store.onPrinterRemoved(sn);
     connectionMonitor?.remove(sn);
+
+    // 从 Broker 删除打印机用户（fire-and-forget）
+    if (_brokerUserMgr != null) {
+      _brokerUserMgr!.deletePrinterUser(sn).then((result) {
+        if (!result.success) {
+          print('[FarmHub] ⚠️ 删除 Broker 用户 $sn 失败: ${result.error}');
+        }
+      });
+    }
+
+    // 清理本地存储的凭据
+    credentialStore.removePrinterCredential(sn);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -197,6 +233,15 @@ class FarmHub {
           );
 
           final mqttPassword = CredentialStore.generatePrinterPassword(printer.sn);
+
+          // 确保 Broker 上存在该打印机用户
+          if (_brokerUserMgr != null) {
+            await _brokerUserMgr!.createPrinterUser(
+              sn: printer.sn,
+              password: mqttPassword,
+            );
+          }
+
           final mqttConfig = MqttConfig(
             brokerAddress: _brokerConfig?.host ?? '',
             brokerPort: _brokerConfig?.port ?? 1883,
@@ -211,6 +256,13 @@ class FarmHub {
           );
 
           if (result.success) {
+            // 更新本地凭据存储
+            await credentialStore.savePrinterCredential(
+              sn: printer.sn,
+              username: 'printer_${printer.sn}',
+              password: mqttPassword,
+            );
+
             store.onPrinterRegistered(PrinterInfo(
               sn: printer.sn,
               ip: printer.ip,

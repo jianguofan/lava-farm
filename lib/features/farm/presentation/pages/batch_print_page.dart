@@ -48,6 +48,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
   BatchPrintCoordinator? _coordinator;
 
+  bool _disposed = false;
+
   @override
   void initState() {
     super.initState();
@@ -56,6 +58,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
   @override
   void dispose() {
+    _disposed = true;
     _coordinator?.dispose();
     super.dispose();
   }
@@ -724,16 +727,17 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       final xfile = await openFile(acceptedTypeGroups: [typeGroup]);
       if (xfile == null) return;
 
-      setState(() {
-        _filePath = xfile.path;
-        _fileName = xfile.name;
-      });
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('选择文件失败: $e')),
-        );
+      if (!_disposed) {
+        setState(() {
+          _filePath = xfile.path;
+          _fileName = xfile.name;
+        });
       }
+    } catch (e) {
+      if (_disposed || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('选择文件失败: $e')),
+      );
     }
   }
 
@@ -795,7 +799,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
     // 订阅流
     _coordinator!.printerUpdateStream.listen((update) {
-      if (!mounted) return;
+      if (_disposed || !mounted) return;
       setState(() {
         _printerStates[update.sn] = update.state;
         _updateLog.add(update);
@@ -803,7 +807,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     });
 
     _coordinator!.progressStream.listen((progress) {
-      if (!mounted) return;
+      if (_disposed || !mounted) return;
       setState(() {
         _progress = progress;
         if (progress.isDone) {

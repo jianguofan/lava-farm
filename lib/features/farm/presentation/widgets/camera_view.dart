@@ -80,6 +80,9 @@ class _MjpegViewState extends State<MjpegView> {
   /// 是否已降级到快照轮询模式
   bool _useFallback = false;
 
+  /// 防止 dispose 后 setState 调用
+  bool _disposed = false;
+
   // ─── Boundary 解析状态 ─────────────────────────────────────────
   // 后端输出格式:
   //   --mjpeg-boundary\r\n
@@ -100,6 +103,7 @@ class _MjpegViewState extends State<MjpegView> {
 
   @override
   void dispose() {
+    _disposed = true;
     _retryTimer?.cancel();
     _watchdogTimer?.cancel();
     _disconnect();
@@ -168,6 +172,7 @@ class _MjpegViewState extends State<MjpegView> {
       _httpClient = client;
       _response = response;
       _consecutiveDecodeErrors = 0;
+      if (_disposed || !mounted) { client.close(); return; }
       setState(() => _connecting = false);
       _resetWatchdog();
       debugPrint('MjpegView: ✅ connected HTTP ${response.statusCode}, '
@@ -199,13 +204,13 @@ class _MjpegViewState extends State<MjpegView> {
   }
 
   void _onFrame(Uint8List jpeg) async {
-    if (!mounted) return;
+    if (_disposed || !mounted) return;
     try {
       final codec = await ui.instantiateImageCodec(jpeg);
       final frameInfo = await codec.getNextFrame();
       final newImage = frameInfo.image;
 
-      if (!mounted) {
+      if (_disposed || !mounted) {
         newImage.dispose();
         return;
       }
@@ -223,7 +228,7 @@ class _MjpegViewState extends State<MjpegView> {
       _streamFailureCount = 0;
       _resetWatchdog();
     } catch (e) {
-      if (!mounted) return;
+      if (_disposed || !mounted) return;
       _consecutiveDecodeErrors++;
       debugPrint('MjpegView: decode error ($_consecutiveDecodeErrors/$_maxDecodeErrors): $e');
       if (_consecutiveDecodeErrors >= _maxDecodeErrors) {
@@ -233,7 +238,7 @@ class _MjpegViewState extends State<MjpegView> {
   }
 
   void _onError(String msg, {bool permanent = false}) {
-    if (!mounted) return;
+    if (_disposed || !mounted) return;
     debugPrint('MjpegView: $msg${permanent ? ' (permanent)' : ''}');
     // 立即断开旧连接并停止看门狗
     _subscription?.cancel();
@@ -500,6 +505,7 @@ class _SnapshotPollerState extends State<_SnapshotPoller> {
   String? _currentUrl;
   int _errorCount = 0;
   static const int _maxErrors = 10;
+  bool _disposed = false;
 
   @override
   void initState() {
@@ -510,6 +516,7 @@ class _SnapshotPollerState extends State<_SnapshotPoller> {
 
   @override
   void dispose() {
+    _disposed = true;
     _timer?.cancel();
     super.dispose();
   }
@@ -525,14 +532,14 @@ class _SnapshotPollerState extends State<_SnapshotPoller> {
       (ImageInfo info, bool sync) {
         stream.removeListener(listener);
         if (!completer.isCompleted) completer.complete();
-        if (!mounted) return;
+        if (_disposed || !mounted) return;
         _errorCount = 0;
         setState(() => _currentUrl = url);
       },
       onError: (dynamic error, StackTrace? stackTrace) {
         stream.removeListener(listener);
         if (!completer.isCompleted) completer.complete();
-        if (!mounted) return;
+        if (_disposed || !mounted) return;
         _errorCount++;
       },
     );

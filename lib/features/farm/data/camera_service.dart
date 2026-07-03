@@ -138,7 +138,10 @@ class CameraService {
               addr['family'] == 'ipv4' &&
               addr['is_link_local'] != true) {
             final ip = addr['address'] as String?;
-            if (ip != null && ip != '127.0.0.1') return ip;
+            if (ip != null && ip != '127.0.0.1') {
+              _router.ipCache[sn] = ip; // 同步更新缓存
+              return ip;
+            }
           }
         }
       }

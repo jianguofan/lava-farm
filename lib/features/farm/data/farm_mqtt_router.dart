@@ -50,8 +50,12 @@ class FarmMqttRouter {
   Timer? _ipResolveTimer;
   static const _ipResolveInterval = Duration(seconds: 30);
 
-  /// 已订阅对象推送的打印机（防止重复 subscribe 导致消息多发）
-  final Set<String> _subscribedSns = {};
+  /// SN → 最后已知有效 IP 缓存（IP 解析成功自动写入，供离线/降级场景查询）
+  final Map<String, String> ipCache = {};
+
+  /// IP 解析连续失败计数（SN → 失败次数），达到 _maxIpFailures 后暂停重试
+  final Map<String, int> _ipFailures = {};
+  static const int _maxIpFailures = 3;
 
   /// 防重入：start() 只能调用一次
   bool _started = false;
@@ -98,7 +102,7 @@ class FarmMqttRouter {
     _messageSub = _transport.messageStream.listen(_onMessage);
 
     // 通配符订阅 — 一条订阅覆盖全部设备
-    await _transport.subscribe('+/status', qos: 1);
+    await _transport.subscribe('+/status', qos: 0); // 状态幂等，丢了下一秒还会来，省 PUBACK 开销
     await _transport.subscribe('+/notification', qos: 1);
 
     // 对已注册设备发送 printer.objects.subscribe 激活状态推送
@@ -137,7 +141,6 @@ class FarmMqttRouter {
     _processor.dispose();
     _tracker.cancelAll();
     _seenTopics.clear();
-    _subscribedSns.clear();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -202,17 +205,21 @@ class FarmMqttRouter {
   /// 全量状态（printer.objects.query）在用户点击详情时按需拉取。
   /// 心跳由 FarmConnectionMonitor 通过被动监听 +/status 消息流驱动。
   Future<void> _probeDevice(String sn) async {
-    // 已有有效 IP 或设备不在线则跳过
+    // 已有有效 IP、设备不在线、或连续失败达上限则跳过
     final printer = _store.allPrinters.where((p) => p.sn == sn).firstOrNull;
     if (printer == null || !printer.isOnline || printer.hasValidIp) return;
+    if ((_ipFailures[sn] ?? 0) >= _maxIpFailures) return;
 
     try {
       final sysInfo = await sendCommand(sn, 'machine.system_info');
       if (sysInfo.success && sysInfo.data != null) {
+        _ipFailures.remove(sn);
         _extractAndUpdateIp(sn, sysInfo.data!);
+      } else {
+        _ipFailures[sn] = (_ipFailures[sn] ?? 0) + 1;
       }
     } catch (_) {
-      // 探测失败不处理
+      _ipFailures[sn] = (_ipFailures[sn] ?? 0) + 1;
     }
   }
 
@@ -223,32 +230,21 @@ class FarmMqttRouter {
   Future<void> fetchFullState(String sn) async {
     print('[Router] 🔍 fetchFullState($sn) 开始...');
     try {
-      // ── 1. printer.objects.query → 全量基线状态 ──
+      // ── 1. printer.objects.query → 全量基线状态（13 核心对象） ──
       final fullState = await sendCommand(sn, 'printer.objects.query', {
         'objects': {
           'extruder': null,
-          'extruder1': null,
-          'extruder2': null,
-          'extruder3': null,
           'heater_bed': null,
           'print_stats': null,
           'job': null,
           'virtual_sdcard': null,
           'toolhead': null,
           'fan': null,
-          'fan_generic cavity_fan': null,
           'display_status': null,
-          'purifier': null,
-          'motion_report': null,
           'gcode_move': null,
           'idle_timeout': null,
           'file_metadata': null,
-          'machine_state_manager': null,
           'webhooks': null,
-          'led cavity_led': null,
-          'print_task_config': null,
-          'filament_feed left': null,
-          'filament_feed right': null,
           'filament_detect': null,
         },
       });
@@ -280,45 +276,50 @@ class FarmMqttRouter {
         }
       }
 
-      // ── 2. server.info → Moonraker 版本、klippy 状态 ──
-      final serverInfo = await sendCommand(sn, 'server.info');
-      if (serverInfo.success && serverInfo.data != null) {
-        final data = serverInfo.data!;
-        _store.updatePrinter(sn, (p) {
-          p.updateDeviceInfo(
-            klippyState: data['klippy_state']?.toString(),
-            moonrakerVersion: data['moonraker_version']?.toString(),
-            apiVersionString: data['api_version_string']?.toString(),
-          );
-          p.addSnapshot(FarmSnapshot(
-            timestamp: DateTime.now(),
-            reason: '设备信息更新',
-            context: 'Moonraker ${data['moonraker_version'] ?? "?"} · Klippy ${data['klippy_state'] ?? "?"}',
-            data: data,
-          ));
-          return p;
-        });
-      }
+      // ── 2-4. 静态元数据（缓存 1 小时，首次必拉） ──
+      final printer = _store.getPrinter(sn);
+      final metaAge = printer?.serverInfoFetchedAt != null
+          ? DateTime.now().difference(printer!.serverInfoFetchedAt!)
+          : const Duration(hours: 999);
+      final needMetaRefresh = metaAge > const Duration(hours: 1);
 
-      // ── 3. printer.info → 主机名、软件版本、CPU ──
-      final printerInfo = await sendCommand(sn, 'printer.info');
-      if (printerInfo.success && printerInfo.data != null) {
-        final data = printerInfo.data!;
-        _store.updatePrinter(sn, (p) {
-          p.hostname = data['hostname']?.toString() ?? p.hostname;
-          p.softwareVersion = data['software_version']?.toString() ?? p.softwareVersion;
-          p.cpuInfo = data['cpu_info']?.toString() ?? p.cpuInfo;
-          if (p.displayName == null || p.displayName!.startsWith(p.sn.substring(p.sn.length - 6))) {
-            p.displayName = data['hostname']?.toString() ?? p.displayName;
-          }
-          return p;
-        });
-      }
+      if (needMetaRefresh) {
+        // server.info → Moonraker 版本、klippy 状态
+        final serverInfo = await sendCommand(sn, 'server.info');
+        if (serverInfo.success && serverInfo.data != null) {
+          final data = serverInfo.data!;
+          _store.updatePrinter(sn, (p) {
+            p.updateDeviceInfo(
+              klippyState: data['klippy_state']?.toString(),
+              moonrakerVersion: data['moonraker_version']?.toString(),
+              apiVersionString: data['api_version_string']?.toString(),
+            );
+            return p;
+          });
+        }
 
-      // ── 4. machine.system_info → LAN IP ──
-      final sysInfo = await sendCommand(sn, 'machine.system_info');
-      if (sysInfo.success && sysInfo.data != null) {
-        _extractAndUpdateIp(sn, sysInfo.data!);
+        // printer.info → 主机名、软件版本、CPU
+        final printerInfo = await sendCommand(sn, 'printer.info');
+        if (printerInfo.success && printerInfo.data != null) {
+          final data = printerInfo.data!;
+          _store.updatePrinter(sn, (p) {
+            p.hostname = data['hostname']?.toString() ?? p.hostname;
+            p.softwareVersion = data['software_version']?.toString() ?? p.softwareVersion;
+            p.cpuInfo = data['cpu_info']?.toString() ?? p.cpuInfo;
+            if (p.displayName == null || p.displayName!.startsWith(p.sn.substring(p.sn.length - 6))) {
+              p.displayName = data['hostname']?.toString() ?? p.displayName;
+            }
+            return p;
+          });
+        }
+
+        // machine.system_info → LAN IP
+        final sysInfo = await sendCommand(sn, 'machine.system_info');
+        if (sysInfo.success && sysInfo.data != null) {
+          _extractAndUpdateIp(sn, sysInfo.data!);
+        }
+      } else {
+        print('[Router] ⏭️ $sn 元数据缓存命中（${metaAge.inMinutes}min ago），跳过 server/printer/system_info');
       }
       // ── 5. printer.objects.subscribe → 激活持续状态推送 ──
       await _subscribeDeviceObjects(sn);
@@ -331,54 +332,25 @@ class FarmMqttRouter {
 
   /// 向设备发送 printer.objects.subscribe，激活指定对象的状态推送
   ///
-  /// ⚠️ 防重入：同一 SN 只订阅一次，避免打印机累积多个订阅导致消息重复发送
+  /// Moonraker 的 subscribe 是幂等的 —— 再次调用会替换而非累积订阅列表。
+  /// 因此始终发送，确保对象列表变更后打印机端立即生效。
   Future<void> _subscribeDeviceObjects(String sn) async {
-    if (_subscribedSns.contains(sn)) return;
-    _subscribedSns.add(sn);
     try {
       await sendCommand(sn, 'printer.objects.subscribe', {
         'objects': {
-          // 挤出机 0-3（extruder + extruder1/2/3）
+          // 核心 13 对象：去掉 motion_report（打印时高频）+ machine_state_manager（同高频）
           'extruder': null,
-          'extruder1': null,
-          'extruder2': null,
-          'extruder3': null,
-          // 热床
           'heater_bed': null,
-          // 打印统计 + 任务
           'print_stats': null,
           'job': null,
-          // 虚拟 SD 卡
           'virtual_sdcard': null,
-          // 工具头
           'toolhead': null,
-          // 风扇（模型风扇 + 腔体风扇）
           'fan': null,
-          'fan_generic cavity_fan': null,
-          // 显示状态（含 progress）
           'display_status': null,
-          // 净化器
-          'purifier': null,
-          // 运动报告
-          'motion_report': null,
-          // GCode 移动
           'gcode_move': null,
-          // 空闲超时（含 printing_time）
           'idle_timeout': null,
-          // 文件元数据（gcode_start_byte / end_byte / estimated_time）
           'file_metadata': null,
-          // 设备状态管理（main_state / action_code）
-          'machine_state_manager': null,
-          // 网络钩子（MQTT 连接状态）
           'webhooks': null,
-          // LED
-          'led cavity_led': null,
-          // 打印任务配置
-          'print_task_config': null,
-          // 进料模块
-          'filament_feed left': null,
-          'filament_feed right': null,
-          // 耗材检测
           'filament_detect': null,
         },
       });
@@ -490,6 +462,7 @@ class FarmMqttRouter {
       if (!printer.isOnline) continue;
       if (printer.hasValidIp) continue; // 缓存命中：已有有效 IP，跳过
       if (_resolvingSns.contains(sn)) continue;
+      if ((_ipFailures[sn] ?? 0) >= _maxIpFailures) continue; // 连续失败超限，跳过
 
       resolveIpInBackground(sn);
     }
@@ -503,15 +476,22 @@ class FarmMqttRouter {
 
   void resolveIpInBackground(String sn) {
     if (_resolvingSns.contains(sn)) return;
+    // 连续失败达上限则暂停重试
+    if ((_ipFailures[sn] ?? 0) >= _maxIpFailures) return;
     _resolvingSns.add(sn);
 
     Future.microtask(() async {
       try {
         final result = await sendCommand(sn, 'machine.system_info');
         if (result.success && result.data != null) {
+          _ipFailures.remove(sn); // 成功则清零
           _extractAndUpdateIp(sn, result.data!);
+        } else {
+          _ipFailures[sn] = (_ipFailures[sn] ?? 0) + 1;
         }
-      } catch (_) {} finally {
+      } catch (_) {
+        _ipFailures[sn] = (_ipFailures[sn] ?? 0) + 1;
+      } finally {
         _resolvingSns.remove(sn);
       }
     });
@@ -543,6 +523,7 @@ class FarmMqttRouter {
             addr['is_link_local'] != true) {
           final ip = addr['address'] as String?;
           if (ip != null && ip != '127.0.0.1') {
+            ipCache[sn] = ip; // 写入缓存
             _store.updatePrinter(sn, (p) {
               p.ip = ip;
               return p;

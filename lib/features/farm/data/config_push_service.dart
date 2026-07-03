@@ -91,7 +91,7 @@ class MqttConfig {
     required this.username,
     required this.password,
     required this.instanceName,
-    this.statusInterval = 1.0,
+    this.statusInterval = 2.0, // 2s 间隔，平衡实时性和带宽
   });
 
   Map<String, dynamic> toJson() => {

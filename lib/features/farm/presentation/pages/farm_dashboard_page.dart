@@ -20,6 +20,7 @@ import '../widgets/deployment_mode_banner.dart';
 import '../widgets/printer_grid.dart';
 import '../widgets/stats_bar.dart';
 import 'broker_setup_page.dart';
+import 'camera_monitor_page.dart';
 import 'discovery_wizard_page.dart';
 import 'printer_detail_page.dart';
 
@@ -112,6 +113,14 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
             onTap: () => _openBrokerSettings(context),
           ),
           const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.videocam),
+            tooltip: '设备监控',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const CameraMonitorPage()),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.dashboard_customize),
             tooltip: '群控打印',
