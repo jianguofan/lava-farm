@@ -2,13 +2,14 @@
 ///
 /// 供用户选择多台打印机 + 3MF/GCode 文件，批量上传并发起打印。
 ///
-/// 流程:
+/// 功能:
 ///   1. 选择文件（.3mf / .gcode / .zip）
 ///   2. 勾选目标打印机（在线可选，离线灰显）
-///   3. 设置打印选项（plate_id 等）
-///   4. 点击"开始打印" → BatchPrintCoordinator 执行
-///   5. 实时显示每台打印机的上传/打印进度
-///   6. 完成后显示汇总 + 重试失败项
+///   3. 床板异物检测（摄像头快照 + LLM 视觉分析）
+///   4. 设置打印选项（plate_id 等）
+///   5. 点击"开始打印" → BatchPrintCoordinator 执行
+///   6. 实时显示每台打印机的上传/打印进度
+///   7. 完成后显示汇总 + 重试失败项
 
 import 'dart:io';
 
@@ -16,10 +17,12 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/providers/bed_inspection_provider.dart';
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../application/services/batch_print_coordinator.dart';
 import '../../data/farm_printer_state.dart';
+import '../../domain/models/bed_inspection_result.dart';
 
 /// 群控打印页面
 class BatchPrintPage extends ConsumerStatefulWidget {
@@ -46,6 +49,9 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   BatchPrintProgress? _progress;
   final List<BatchPrintPrinterUpdate> _updateLog = [];
 
+  // ── 检测状态 ──
+  bool _isInspecting = false;
+
   BatchPrintCoordinator? _coordinator;
 
   bool _disposed = false;
@@ -71,6 +77,11 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   Widget build(BuildContext context) {
     final printers = ref.watch(printerListProvider);
     final gateway = ref.watch(farmCommandGatewayProvider);
+
+    // 监听检测状态
+    _isInspecting = ref.watch(bedInspectionLoadingProvider);
+    // 触发检测结果重建
+    final inspectionResults = ref.watch(bedInspectionResultsProvider);
 
     // 筛选可用打印机（在线 + 有 IP 才可选）
     final readyPrinters = printers
@@ -103,7 +114,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           const Divider(height: 1),
 
           // ── 打印机选择 ──
-          _buildPrinterSection(readyPrinters, pendingPrinters, offlinePrinters),
+          _buildPrinterSection(readyPrinters, pendingPrinters, offlinePrinters, inspectionResults),
 
           const Divider(height: 1),
 
@@ -168,6 +179,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     List<FarmPrinterState> readyPrinters,
     List<FarmPrinterState> pendingPrinters,
     List<FarmPrinterState> offlinePrinters,
+    Map<String, BedInspectionResult> inspectionResults,
   ) {
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -184,6 +196,18 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const Spacer(),
+              // 床板检测按钮
+              _InspectButton(
+                isInspecting: _isInspecting,
+                onTap: _isInspecting
+                    ? null
+                    : () {
+                        ref
+                            .read(bedInspectionResultsProvider.notifier)
+                            .inspectAll();
+                      },
+              ),
+              const SizedBox(width: 4),
               if (!_isExecuting) ...[
                 _QuickAction(
                   label: '全选就绪',
@@ -226,10 +250,14 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                   if (index < readyPrinters.length) {
                     final printer = readyPrinters[index];
                     final isSelected = _selectedSns.contains(printer.sn);
-                    return _buildSelectablePrinterCard(printer, isSelected);
+                    final inspectionResult = inspectionResults[printer.sn];
+                    return _buildSelectablePrinterCard(printer, isSelected,
+                        inspectionResult: inspectionResult);
                   } else {
                     final printer = pendingPrinters[index - readyPrinters.length];
-                    return _buildPendingPrinterCard(printer);
+                    final inspectionResult = inspectionResults[printer.sn];
+                    return _buildPendingPrinterCard(printer,
+                        inspectionResult: inspectionResult);
                   }
                 },
               ),
@@ -249,7 +277,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   }
 
   /// IP 待解析的打印机（在线但无 IP，不可选）
-  Widget _buildPendingPrinterCard(FarmPrinterState printer) {
+  Widget _buildPendingPrinterCard(FarmPrinterState printer,
+      {BedInspectionResult? inspectionResult}) {
     return SizedBox(
       width: 150,
       child: Card(
@@ -293,6 +322,9 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
               const SizedBox(height: 2),
               Text('IP 解析中...',
                   style: TextStyle(fontSize: 9, color: Colors.orange.shade600)),
+              const SizedBox(height: 4),
+              // 检测结果（仅显示文字状态，无图因为 IP 未知）
+              _buildInspectionStatusLine(inspectionResult),
               const Spacer(),
             ],
           ),
@@ -301,8 +333,11 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     );
   }
 
-  Widget _buildSelectablePrinterCard(FarmPrinterState printer, bool isSelected) {
+  Widget _buildSelectablePrinterCard(FarmPrinterState printer, bool isSelected,
+      {BedInspectionResult? inspectionResult}) {
     final isOnline = printer.isOnline && printer.ip != '—';
+    final frameUrl =
+        'http://${printer.ip}:${printer.port}/server/files/camera/monitor.jpg';
 
     return GestureDetector(
       onTap: _isExecuting
@@ -315,18 +350,22 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                 }
               }),
       child: SizedBox(
-        width: 150,
+        width: 160,
         child: Card(
           elevation: isSelected ? 3 : 1,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(10),
             side: BorderSide(
-              color: isSelected ? Colors.blue : Colors.transparent,
-              width: 2,
+              color: isSelected
+                  ? Colors.blue
+                  : inspectionResult?.hasForeignObjects == true
+                      ? Colors.red.shade300
+                      : Colors.transparent,
+              width: isSelected ? 2 : 1,
             ),
           ),
           child: Padding(
-            padding: const EdgeInsets.all(10),
+            padding: const EdgeInsets.all(8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -341,7 +380,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                       size: 18,
                       color: isOnline ? Colors.blue : Colors.grey,
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     // 状态点
                     Container(
                       width: 8,
@@ -365,7 +404,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
                   printer.sn,
                   style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
@@ -377,6 +416,55 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                   style: TextStyle(fontSize: 9, color: Colors.grey.shade500),
                   overflow: TextOverflow.ellipsis,
                 ),
+                const SizedBox(height: 6),
+                // 摄像头快照
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 80,
+                    child: _isInspecting && inspectionResult == null
+                        ? Container(
+                            color: Colors.grey.shade100,
+                            child: Center(
+                              child: SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.blue.shade300),
+                              ),
+                            ),
+                          )
+                        : Image.network(
+                            frameUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: Colors.grey.shade100,
+                              child: Icon(Icons.videocam_off,
+                                  size: 20, color: Colors.grey.shade300),
+                            ),
+                            loadingBuilder: (_, child, progress) {
+                              if (progress == null) return child;
+                              return Container(
+                                color: Colors.grey.shade100,
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.grey.shade300),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                // 检测结果
+                _buildInspectionStatusLine(inspectionResult),
                 const Spacer(),
                 // 执行状态指示
                 if (_isExecuting || _isDone)
@@ -845,6 +933,100 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           s == BatchPrintPrinterState.printFailed,
     );
   }
+}
+
+/// 床板检测按钮
+class _InspectButton extends StatelessWidget {
+  final bool isInspecting;
+  final VoidCallback? onTap;
+
+  const _InspectButton({required this.isInspecting, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isInspecting)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child:
+                    CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+              )
+            else
+              Icon(Icons.search, size: 14, color: Colors.blue.shade700),
+            const SizedBox(width: 2),
+            Text(
+              isInspecting ? '检测中' : '床板检测',
+              style: TextStyle(
+                fontSize: 11,
+                color: onTap == null ? Colors.grey : Colors.blue.shade700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 检测状态行（紧凑，用于卡片内嵌）
+Widget _buildInspectionStatusLine(BedInspectionResult? result) {
+  if (result == null) {
+    return Text('待检测',
+        style: TextStyle(fontSize: 9, color: Colors.grey.shade400));
+  }
+
+  if (result.hasForeignObjects) {
+    return Row(
+      children: [
+        const Icon(Icons.warning_amber_rounded, size: 12, color: Colors.red),
+        const SizedBox(width: 2),
+        Expanded(
+          child: Text(
+            result.bedForeignObjects.description,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 9, color: Colors.red.shade700, height: 1.3),
+          ),
+        ),
+      ],
+    );
+  }
+
+  if (result.isReadyToPrint) {
+    return Row(
+      children: [
+        Icon(Icons.check_circle, size: 12, color: Colors.green.shade600),
+        const SizedBox(width: 2),
+        Text(
+          result.printReadiness.caution ? '可打印（注意）' : '床板干净',
+          style: TextStyle(fontSize: 9, color: Colors.green.shade700),
+        ),
+      ],
+    );
+  }
+
+  return Row(
+    children: [
+      Icon(Icons.info_outline, size: 12, color: Colors.orange.shade600),
+      const SizedBox(width: 2),
+      Expanded(
+        child: Text(
+          result.printReadiness.reason,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 9, color: Colors.orange.shade700),
+        ),
+      ),
+    ],
+  );
 }
 
 /// 快速操作按钮
