@@ -1083,11 +1083,11 @@ class _CameraSectionState extends ConsumerState<_CameraSection> {
     final loadIntoA = !_showBufferA; // 加载到当前隐藏的 buffer
 
     try {
-      final uri = Uri.parse(_frameUrl!);
+      final uri = Uri.parse('${_frameUrl!}?ts=${DateTime.now().millisecondsSinceEpoch ~/ 1000}');
       final request = await _frameHttpClient.getUrl(uri);
       request.headers.set('Accept', 'image/jpeg, image/png, image/*');
       final response = await request.close().timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 30),
       );
 
       if (response.statusCode != 200) {

@@ -41,7 +41,7 @@ class BedInspectionNotifier
     _isLoading = true;
     try {
       final printers = store.allPrinters;
-      final results = await service.inspectAll(printers, concurrency: 3);
+      final results = await service.inspectAll(printers);
       state = {...state, ...results};
     } catch (e, stack) {
       debugPrint('[BedInspectionNotifier] inspectAll 异常: $e');
@@ -63,7 +63,8 @@ class BedInspectionNotifier
     try {
       final result = await service.inspectPrinter(printer);
       if (result != null) {
-        state = {...state, sn: result};
+        final key = result.sn.isNotEmpty ? result.sn : sn;
+        state = {...state, key: result};
       }
     } catch (e) {
       debugPrint('[BedInspectionNotifier] inspectOne($sn) 失败: $e');

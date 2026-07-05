@@ -27,7 +27,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
   String? _errorMessage;
 
   // ── 表单 ──
-  final _hostController = TextEditingController(text: '172.18.1.54');
+  final _hostController = TextEditingController(text: '172.18.0.160');
   final _portController = TextEditingController(text: '1883');
   final _usernameController = TextEditingController(text: 'lava_app');
   final _passwordController = TextEditingController(text: 'lava-farm-admin');
@@ -292,7 +292,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
     // ];
     const demoDevices = [
       ('8110025070800069BU7J', '客户端-01', 'client'),
-      ('811002605310262H7H8', '客户端-02', 'client'),
+      ('8110026050310262H7H8', '客户端-02', 'client'),
     ];
     for (final (sn, name, group) in demoDevices) {
       if (store.getPrinter(sn) == null) {

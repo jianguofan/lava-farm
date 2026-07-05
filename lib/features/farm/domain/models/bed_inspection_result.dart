@@ -129,12 +129,14 @@ class InspectionComponents {
 
 /// 床板异物检测完整结果
 class BedInspectionResult {
+  final String sn;
   final String timestamp;
   final InspectionComponents components;
   final BedForeignObjects bedForeignObjects;
   final PrintReadiness printReadiness;
 
   const BedInspectionResult({
+    this.sn = '',
     required this.timestamp,
     required this.components,
     required this.bedForeignObjects,
@@ -144,6 +146,7 @@ class BedInspectionResult {
   factory BedInspectionResult.fromJson(Map<String, dynamic> json) {
     final inspection = json['inspection'] as Map<String, dynamic>? ?? {};
     return BedInspectionResult(
+      sn: inspection['sn'] as String? ?? '',
       timestamp: inspection['timestamp'] as String? ?? '',
       components: InspectionComponents.fromJson(
           (inspection['components'] as Map<String, dynamic>?) ?? {}),
@@ -156,6 +159,7 @@ class BedInspectionResult {
 
   Map<String, dynamic> toJson() => {
         'inspection': {
+          'sn': sn,
           'timestamp': timestamp,
           'components': components.toJson(),
           'bed_foreign_objects': bedForeignObjects.toJson(),

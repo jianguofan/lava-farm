@@ -417,11 +417,11 @@ class _CameraFeedCardState extends State<_CameraFeedCard> {
     final loadIntoA = !_showBufferA;
 
     try {
-      final uri = Uri.parse(_frameUrl!);
+      final uri = Uri.parse('${_frameUrl!}?ts=${DateTime.now().millisecondsSinceEpoch ~/ 1000}');
       final request = await _frameHttpClient.getUrl(uri);
       request.headers.set('Accept', 'image/jpeg, image/png, image/*');
       final response = await request.close().timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 30),
       );
 
       if (response.statusCode != 200) {

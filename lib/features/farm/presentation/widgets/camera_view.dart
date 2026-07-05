@@ -156,7 +156,7 @@ class _MjpegViewState extends State<MjpegView> {
     try {
       final client = HttpClient();
       client.autoUncompress = false; // 关键：禁止自动 gzip 解压，确保原始字节透传
-      client.connectionTimeout = const Duration(seconds: 5);
+      client.connectionTimeout = const Duration(seconds: 30);
 
       final request = await client.getUrl(Uri.parse(widget.url));
       final response = await request.close();

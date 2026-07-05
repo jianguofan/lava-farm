@@ -107,8 +107,11 @@ class CameraService {
 
   /// 构造帧图片 URL（LAN 模式，来自 lava_app 实现）
   /// 格式: http://{ip}:{port}/server/files/camera/monitor.jpg
-  String _buildFrameUrl(String ip, int port) {
-    return 'http://$ip:$port/server/files/camera/monitor.jpg';
+  ///
+  /// [timestamp] 可选时间戳，用于强制刷新（绕过 HTTP/Flutter 图片缓存）
+  String _buildFrameUrl(String ip, int port, {int? timestamp}) {
+    final ts = timestamp != null ? '?ts=$timestamp' : '';
+    return 'http://$ip:$port/server/files/camera/monitor.jpg$ts';
   }
 
   /// 构造 MJPEG 流 URL

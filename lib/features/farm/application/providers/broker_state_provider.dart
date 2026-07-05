@@ -239,8 +239,7 @@ final farmHubProvider = Provider<FarmHub>((ref) {
 // ═══════════════════════════════════════════════════════════
 
 final batchPrintCoordinatorProvider = Provider<BatchPrintCoordinator>((ref) {
-  final gateway = ref.watch(farmCommandGatewayProvider);
-  return BatchPrintCoordinator(gateway: gateway);
+  return BatchPrintCoordinator();
 });
 
 // ═══════════════════════════════════════════════════════════

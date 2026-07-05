@@ -38,8 +38,11 @@ const String _inspectionPrompt = '''### 角色
 
 ### 输出JSON Schema（严格遵守，仅输出JSON）
 
+你正在检查的打印机序列号是：__PRINTER_SN__。必须在输出中返回这个序列号。
+
 {
   "inspection": {
+    "sn": "__PRINTER_SN__",
     "timestamp": "ISO8601",
     "components": {
       "print_bed":  {"detected": bool, "confidence": 0.0},
@@ -122,7 +125,7 @@ class BedInspectionService {
       final frameUrl = 'http://$ip:$port/server/files/camera/monitor.jpg';
       debugPrint('[BedInspection] $sn: 下载快照 $frameUrl');
       final imageBytes = await _downloadImage(frameUrl).timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 30),
         onTimeout: () {
           debugPrint('[BedInspection] $sn: 下载快照超时');
           return null;
@@ -158,30 +161,26 @@ class BedInspectionService {
     }
   }
 
-  /// 批量检测（限制并发数）
+  /// 批量检测（全并发，通过 LLM 返回的 SN 精确匹配结果）
   Future<Map<String, BedInspectionResult>> inspectAll(
-    List<FarmPrinterState> printers, {
-    int concurrency = 3,
-  }) async {
+    List<FarmPrinterState> printers,
+  ) async {
     final results = <String, BedInspectionResult>{};
     final onlinePrinters =
         printers.where((p) => p.isOnline && p.hasValidIp).toList();
 
-    debugPrint(
-        '[BedInspection] 开始检测 ${onlinePrinters.length}/${printers.length} 台在线设备');
+    if (onlinePrinters.isEmpty) return results;
 
-    // 并发控制：按 concurrency 分批
-    for (var i = 0; i < onlinePrinters.length; i += concurrency) {
-      final batch = onlinePrinters.skip(i).take(concurrency);
-      final batchResults = await Future.wait(
-        batch.map((p) => inspectPrinter(p)),
-      );
-      for (var j = 0; j < batch.length; j++) {
-        final printer = batch.elementAt(j);
-        final result = batchResults[j];
-        if (result != null) {
-          results[printer.sn] = result;
-        }
+    debugPrint(
+        '[BedInspection] 开始检测 ${onlinePrinters.length}/${printers.length} 台在线设备（全并发）');
+
+    final allResults = await Future.wait(
+      onlinePrinters.map((p) => inspectPrinter(p)),
+    );
+
+    for (final result in allResults) {
+      if (result != null && result.sn.isNotEmpty) {
+        results[result.sn] = result;
       }
     }
 
@@ -283,11 +282,13 @@ class BedInspectionService {
         detail: 'auto',
       );
 
+      final promptWithSn = _inspectionPrompt.replaceAll('__PRINTER_SN__', sn);
+
       final messages = [
         {
           'role': 'user',
           'content': [
-            ContentPart.text(_inspectionPrompt),
+            ContentPart.text(promptWithSn),
             imagePart,
           ],
         },

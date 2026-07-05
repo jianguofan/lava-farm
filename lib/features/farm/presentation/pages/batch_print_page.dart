@@ -486,6 +486,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     String label;
 
     switch (state) {
+      case BatchPrintPrinterState.queued:
+        return Icon(Icons.hourglass_empty, size: 14, color: Colors.grey.shade400);
       case BatchPrintPrinterState.uploading:
         return const SizedBox(
           width: 14,
@@ -622,6 +624,9 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   Widget _buildProgressSection() {
     final progress = _progress;
 
+    // 按阶段分组打印机
+    final groups = _buildPrinterGroups();
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -664,112 +669,270 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
             const SizedBox(height: 8),
 
             // 统计
-            Row(
-              children: [
-                _Stat(label: '上传中', count: progress.uploadingCount, color: Colors.blue),
-                const SizedBox(width: 12),
-                _Stat(label: '启动中', count: progress.startingPrintCount, color: Colors.orange),
-                const SizedBox(width: 12),
-                _Stat(label: '成功', count: progress.successCount, color: Colors.green),
-                const SizedBox(width: 12),
-                _Stat(label: '失败', count: progress.failedCount, color: Colors.red),
-                const Spacer(),
-                Text(
-                  '${progress.completedCount}/${progress.totalPrinters}',
-                  style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-                ),
-              ],
-            ),
+            _buildStatsRow(progress),
           ],
 
           const SizedBox(height: 12),
 
-          // 详细日志
+          // 阶段分组视图
           Expanded(
-            child: ListView.separated(
-              itemCount: _updateLog.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final update = _updateLog[_updateLog.length - 1 - index]; // 最新在上
-                return _buildLogEntry(update);
-              },
-            ),
+            child: groups.isEmpty
+                ? Center(
+                    child: Text(
+                      '等待开始...',
+                      style: TextStyle(color: Colors.grey.shade400),
+                    ),
+                  )
+                : ListView(
+                    children: groups,
+                  ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildLogEntry(BatchPrintPrinterUpdate update) {
-    IconData icon;
-    Color color;
+  /// 构建统计行
+  Widget _buildStatsRow(BatchPrintProgress? progress) {
+    if (progress == null) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 12,
+      runSpacing: 4,
+      children: [
+        _Stat(label: '排队', count: progress.queuedCount, color: Colors.grey),
+        _Stat(label: '上传中', count: progress.uploadingCount, color: Colors.blue),
+        _Stat(label: '启动中', count: progress.startingPrintCount, color: Colors.orange),
+        _Stat(label: '成功', count: progress.successCount, color: Colors.green),
+        _Stat(label: '失败', count: progress.failedCount, color: Colors.red),
+        Text(
+          '${progress.completedCount}/${progress.totalPrinters}',
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+        ),
+      ],
+    );
+  }
 
-    switch (update.state) {
-      case BatchPrintPrinterState.uploading:
-        icon = Icons.cloud_upload_outlined;
-        color = Colors.blue;
-      case BatchPrintPrinterState.uploadDone:
-        icon = Icons.cloud_done_outlined;
-        color = Colors.blue;
-      case BatchPrintPrinterState.startingPrint:
-        icon = Icons.play_circle_outline;
-        color = Colors.orange;
-      case BatchPrintPrinterState.success:
-        icon = Icons.check_circle;
-        color = Colors.green;
-      case BatchPrintPrinterState.uploadFailed:
-        icon = Icons.error_outline;
-        color = Colors.red;
-      case BatchPrintPrinterState.printFailed:
-        icon = Icons.warning_amber;
-        color = Colors.orange;
+  /// 按阶段分组打印机列表
+  List<Widget> _buildPrinterGroups() {
+    final stateMap = Map<String, BatchPrintPrinterState>.from(_printerStates);
+
+    // 定义分组（按流程顺序）
+    final groupDefs = [
+      _GroupDef(
+        label: '排队中',
+        icon: Icons.hourglass_empty,
+        color: Colors.grey.shade600,
+        bgColor: Colors.grey.shade50,
+        states: {BatchPrintPrinterState.queued},
+      ),
+      _GroupDef(
+        label: '上传文件',
+        icon: Icons.cloud_upload_outlined,
+        color: Colors.blue.shade700,
+        bgColor: Colors.blue.shade50,
+        states: {BatchPrintPrinterState.uploading},
+      ),
+      _GroupDef(
+        label: '启动打印',
+        icon: Icons.play_circle_outline,
+        color: Colors.orange.shade700,
+        bgColor: Colors.orange.shade50,
+        states: {BatchPrintPrinterState.uploadDone, BatchPrintPrinterState.startingPrint},
+      ),
+      _GroupDef(
+        label: '已完成',
+        icon: Icons.check_circle,
+        color: Colors.green.shade700,
+        bgColor: Colors.green.shade50,
+        states: {BatchPrintPrinterState.success},
+        defaultExpanded: false,
+      ),
+      _GroupDef(
+        label: '失败',
+        icon: Icons.error_outline,
+        color: Colors.red.shade700,
+        bgColor: Colors.red.shade50,
+        states: {BatchPrintPrinterState.uploadFailed, BatchPrintPrinterState.printFailed},
+        defaultExpanded: true,
+      ),
+    ];
+
+    final widgets = <Widget>[];
+    for (final def_ in groupDefs) {
+      final members = <MapEntry<String, BatchPrintPrinterState>>[];
+      for (final entry in stateMap.entries) {
+        if (def_.states.contains(entry.value)) {
+          members.add(entry);
+        }
+      }
+
+      if (members.isEmpty) continue;
+
+      widgets.add(_buildGroup(def_, members));
+      widgets.add(const SizedBox(height: 4));
     }
 
-    final stateLabel = switch (update.state) {
-      BatchPrintPrinterState.uploading => '上传中',
-      BatchPrintPrinterState.uploadDone => '上传完成',
-      BatchPrintPrinterState.startingPrint => '启动打印',
-      BatchPrintPrinterState.success => '打印已启动',
-      BatchPrintPrinterState.uploadFailed => '上传失败',
-      BatchPrintPrinterState.printFailed => '打印启动失败',
-    };
+    return widgets;
+  }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
+  /// 单个阶段分组
+  Widget _buildGroup(
+    _GroupDef def_,
+    List<MapEntry<String, BatchPrintPrinterState>> members,
+  ) {
+    return Card(
+      elevation: 0,
+      color: def_.bgColor,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: def_.color.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 16, color: color),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              update.sn,
-              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+          // 分组标题
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                Icon(def_.icon, size: 16, color: def_.color),
+                const SizedBox(width: 6),
+                Text(
+                  def_.label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: def_.color,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: def_.color.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '${members.length}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: def_.color,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          Text(
-            stateLabel,
-            style: TextStyle(fontSize: 12, color: color),
-          ),
-          if (update.error != null) ...[
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                update.error!,
-                style: TextStyle(fontSize: 11, color: Colors.red.shade400),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-          if (update.elapsed != null) ...[
-            const SizedBox(width: 8),
-            Text(
-              '${update.elapsed!.inSeconds}s',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-            ),
-          ],
+
+          // 分组内打印机列表
+          ...members.map((entry) => _buildPrinterItem(entry.key, entry.value, def_.color)),
         ],
       ),
     );
+  }
+
+  /// 分组内单台打印机条目
+  Widget _buildPrinterItem(String sn, BatchPrintPrinterState state, Color groupColor) {
+    final error = _getError(sn);
+    final elapsed = _getElapsed(sn);
+
+    final (statusIcon, statusLabel) = switch (state) {
+      BatchPrintPrinterState.queued => (
+          Icons.hourglass_empty,
+          '等待中',
+        ),
+      BatchPrintPrinterState.uploading => (
+          Icons.cloud_upload_outlined,
+          '上传中',
+        ),
+      BatchPrintPrinterState.uploadDone => (
+          Icons.cloud_done_outlined,
+          '上传完成',
+        ),
+      BatchPrintPrinterState.startingPrint => (
+          Icons.play_circle_outline,
+          '正在启动',
+        ),
+      BatchPrintPrinterState.success => (
+          Icons.check_circle,
+          '打印已启动',
+        ),
+      BatchPrintPrinterState.uploadFailed => (
+          Icons.error_outline,
+          '上传失败',
+        ),
+      BatchPrintPrinterState.printFailed => (
+          Icons.warning_amber,
+          '打印启动失败',
+        ),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(color: groupColor.withOpacity(0.15)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(statusIcon, size: 14, color: groupColor),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              sn,
+              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (error != null) ...[
+            const SizedBox(width: 6),
+            Flexible(
+              child: Tooltip(
+                message: error,
+                child: Text(
+                  error,
+                  style: TextStyle(fontSize: 10, color: Colors.red.shade400),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ],
+          if (elapsed != null) ...[
+            const SizedBox(width: 6),
+            Text(
+              '${elapsed.inSeconds}s',
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+            ),
+          ],
+          const SizedBox(width: 6),
+          Text(
+            statusLabel,
+            style: TextStyle(fontSize: 10, color: groupColor),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? _getError(String sn) {
+    // 从最近更新日志中查找错误信息
+    for (final update in _updateLog.reversed) {
+      if (update.sn == sn && update.error != null) {
+        return update.error;
+      }
+    }
+    return null;
+  }
+
+  Duration? _getElapsed(String sn) {
+    for (final update in _updateLog.reversed) {
+      if (update.sn == sn && update.elapsed != null) {
+        return update.elapsed;
+      }
+    }
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -883,7 +1046,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       _updateLog.clear();
     });
 
-    _coordinator = BatchPrintCoordinator(gateway: gateway);
+    _coordinator = BatchPrintCoordinator();
 
     // 订阅流
     _coordinator!.printerUpdateStream.listen((update) {
@@ -910,6 +1073,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       connectionInfo: connectionInfo,
       localFilePath: _filePath!,
       remoteFileName: _fileName!,
+      gateway: gateway,
       printPlate: _printPlate,
     );
   }
@@ -917,13 +1081,26 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   Future<void> _retryFailed() async {
     if (_coordinator == null) return;
 
+    final gateway = ref.read(farmCommandGatewayProvider);
+    if (gateway == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('MQTT 未连接，无法重试')),
+        );
+      }
+      return;
+    }
+
     setState(() {
       _isExecuting = true;
       _isDone = false;
       _progress = null;
     });
 
-    await _coordinator!.retryFailed(printPlate: _printPlate);
+    await _coordinator!.retryFailed(
+      gateway: gateway,
+      printPlate: _printPlate,
+    );
   }
 
   bool get _hasFailures {
@@ -1056,6 +1233,25 @@ class _QuickAction extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 阶段分组定义
+class _GroupDef {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final Color bgColor;
+  final Set<BatchPrintPrinterState> states;
+  final bool defaultExpanded;
+
+  const _GroupDef({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.bgColor,
+    required this.states,
+    this.defaultExpanded = true,
+  });
 }
 
 /// 统计数字
