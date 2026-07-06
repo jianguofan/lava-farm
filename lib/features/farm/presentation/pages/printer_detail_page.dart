@@ -213,7 +213,7 @@ class _MetadataCard extends StatelessWidget {
             // ── 基本信息 ──
             _MetaRow('序列号', printer.sn),
             _MetaRow('主机名', printer.hostname ?? '—'),
-            _MetaRow('IP 地址', '${printer.ip}:${printer.port}'),
+            _IpRefreshRow(sn: printer.sn, ip: printer.ip, port: printer.port),
             _MetaRow('分组', printer.group ?? '未分组'),
 
             // ── 设备信息 ──
@@ -272,6 +272,122 @@ class _MetadataCard extends StatelessWidget {
     return '${dt.hour.toString().padLeft(2, '0')}:'
         '${dt.minute.toString().padLeft(2, '0')}:'
         '${dt.second.toString().padLeft(2, '0')}';
+  }
+}
+
+/// IP 地址行（带刷新按钮）
+class _IpRefreshRow extends ConsumerStatefulWidget {
+  final String sn;
+  final String ip;
+  final int port;
+
+  const _IpRefreshRow({
+    required this.sn,
+    required this.ip,
+    required this.port,
+  });
+
+  @override
+  ConsumerState<_IpRefreshRow> createState() => _IpRefreshRowState();
+}
+
+class _IpRefreshRowState extends ConsumerState<_IpRefreshRow> {
+  bool _resolving = false;
+
+  Future<void> _refreshIp() async {
+    if (_resolving) return;
+    setState(() => _resolving = true);
+
+    try {
+      final router = ref.read(farmMqttRouterProvider);
+      if (router == null) return;
+
+      final result = await router.sendCommand(widget.sn, 'machine.system_info');
+      if (!mounted) return;
+
+      if (result.success && result.data != null) {
+        final sysInfo = result.data!['system_info'] as Map<String, dynamic>?;
+        final network = sysInfo?['network'] as Map<String, dynamic>?;
+        if (network == null) return;
+
+        String? resolved;
+        for (final entry in network.entries) {
+          final iface = entry.value as Map<String, dynamic>?;
+          final addresses = iface?['ip_addresses'] as List?;
+          if (addresses == null) continue;
+
+          for (final addr in addresses) {
+            if (addr is Map<String, dynamic> &&
+                addr['family'] == 'ipv4' &&
+                addr['is_link_local'] != true) {
+              final ip = addr['address'] as String?;
+              if (ip != null && ip != '127.0.0.1') {
+                resolved = ip;
+                break;
+              }
+            }
+          }
+          if (resolved != null) break;
+        }
+
+        if (resolved != null) {
+          final store = ref.read(farmStoreProvider);
+          store.updatePrinter(widget.sn, (p) {
+            p.ip = resolved!;
+            return p;
+          });
+          // 同步更新 ipCache
+          router.ipCache[widget.sn] = resolved;
+          router.persistIp(widget.sn, resolved);
+        }
+      }
+    } catch (e) {
+      debugPrint('[_IpRefreshRow] IP 刷新失败: $e');
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 72,
+            child: Text('IP 地址',
+                style: TextStyle(fontSize: 12, color: Color(0xFF999999))),
+          ),
+          Expanded(
+            child: Text(
+              '${widget.ip}:${widget.port}',
+              style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  fontFamily: 'monospace'),
+            ),
+          ),
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: _resolving
+                ? const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : IconButton(
+                    padding: EdgeInsets.zero,
+                    iconSize: 14,
+                    icon: const Icon(Icons.refresh),
+                    tooltip: '刷新 IP',
+                    onPressed: _refreshIp,
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

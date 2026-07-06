@@ -80,8 +80,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
     // 监听检测状态
     _isInspecting = ref.watch(bedInspectionLoadingProvider);
-    // 触发检测结果重建
-    final inspectionResults = ref.watch(bedInspectionResultsProvider);
+    // 触发检测结果重建（只取 results map）
+    final inspectionResults = ref.watch(bedInspectionResultsMapProvider);
 
     // 筛选可用打印机（在线 + 有 IP 才可选）
     final readyPrinters = printers

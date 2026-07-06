@@ -161,7 +161,12 @@ class BedInspectionService {
     }
   }
 
-  /// 批量检测（全并发，通过 LLM 返回的 SN 精确匹配结果）
+  /// 批量检测
+  ///
+  /// 流程：
+  ///   1. 并发启动所有摄像头（MQTT fire-and-forget）
+  ///   2. 统一等待一次（确保摄像头启动完毕）
+  ///   3. 逐个下载快照 + LLM 分析（顺序执行，LLM proxy 不支持并发）
   Future<Map<String, BedInspectionResult>> inspectAll(
     List<FarmPrinterState> printers,
   ) async {
@@ -172,13 +177,22 @@ class BedInspectionService {
     if (onlinePrinters.isEmpty) return results;
 
     debugPrint(
-        '[BedInspection] 开始检测 ${onlinePrinters.length}/${printers.length} 台在线设备（全并发）');
+        '[BedInspection] 开始检测 ${onlinePrinters.length}/${printers.length} 台在线设备');
 
-    final allResults = await Future.wait(
-      onlinePrinters.map((p) => inspectPrinter(p)),
+    // Phase 1: 并发启动所有摄像头
+    debugPrint('[BedInspection] Phase 1: 并发启动 ${onlinePrinters.length} 台摄像头…');
+    await Future.wait(
+      onlinePrinters.map((p) => _startCamera(p.sn)),
     );
+    // 统一等待一次，确保所有摄像头都就绪
+    await Future<void>.delayed(const Duration(milliseconds: 800));
 
-    for (final result in allResults) {
+    // Phase 2: 逐个下载+分析（LLM proxy 不支持并发，顺序执行）
+    debugPrint('[BedInspection] Phase 2: 逐个下载+分析 ${onlinePrinters.length} 台…');
+    for (var i = 0; i < onlinePrinters.length; i++) {
+      final printer = onlinePrinters[i];
+      debugPrint('[BedInspection] [${i + 1}/${onlinePrinters.length}] ${printer.sn}');
+      final result = await _downloadAndAnalyze(printer);
       if (result != null && result.sn.isNotEmpty) {
         results[result.sn] = result;
       }
@@ -187,6 +201,51 @@ class BedInspectionService {
     debugPrint(
         '[BedInspection] 检测完成: ${results.length}/${onlinePrinters.length} 成功');
     return results;
+  }
+
+  /// 下载快照 + LLM 分析（不含摄像头启动）
+  Future<BedInspectionResult?> _downloadAndAnalyze(
+      FarmPrinterState printer) async {
+    final sn = printer.sn;
+    final ip = printer.ip;
+    final port = printer.port;
+
+    try {
+      // 下载摄像头快照
+      final frameUrl = 'http://$ip:$port/server/files/camera/monitor.jpg';
+      debugPrint('[BedInspection] $sn: 下载快照…');
+      final imageBytes = await _downloadImage(frameUrl).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          debugPrint('[BedInspection] $sn: 下载快照超时');
+          return null;
+        },
+      );
+
+      if (imageBytes == null || imageBytes.length < 100) {
+        debugPrint('[BedInspection] $sn: 快照为空或过小，跳过');
+        return null;
+      }
+
+      // 压缩图片
+      debugPrint(
+          '[BedInspection] $sn: 原始图片 ${(imageBytes.length / 1024).toStringAsFixed(1)}KB');
+      final compressedBytes = _compressImage(imageBytes);
+      debugPrint(
+          '[BedInspection] $sn: 压缩后 ${(compressedBytes.length / 1024).toStringAsFixed(1)}KB');
+
+      // 调用 LLM
+      final result = await _callLLM(compressedBytes, sn);
+      if (result != null) {
+        debugPrint('[BedInspection] $sn: statusSummary=${result.statusSummary}');
+        debugPrint('[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
+      }
+      return result;
+    } catch (e, stack) {
+      debugPrint('[BedInspection] $sn: 下载/分析失败 — $e');
+      debugPrint('$stack');
+      return null;
+    }
   }
 
   /// MQTT 启动摄像头（fire-and-forget）

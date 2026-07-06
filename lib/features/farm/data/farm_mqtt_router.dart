@@ -561,6 +561,12 @@ class FarmMqttRouter {
   /// 格式: {"server":"online"} 或 {"server":"offline"}
   void _handleNotification(String sn, Map<String, dynamic> json) {
     _store.onMqttNotification(sn, json);
+
+    // 设备上线时重新订阅（确保 MQTT 推送完整对象列表包括打印进度）
+    final event = json['server'] as String?;
+    if (event == 'online') {
+      unawaited(_subscribeDeviceObjects(sn));
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
