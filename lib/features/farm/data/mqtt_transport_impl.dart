@@ -17,7 +17,8 @@ import 'broker_connection_manager.dart';
 class MqttTransportImpl implements MqttTransportAdapter {
   final BrokerConfig _config;
   mqtt_server.MqttServerClient? _client;
-  StreamSubscription<List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>>>? _updateSub;
+  StreamSubscription<List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>>>?
+      _updateSub;
 
   final StreamController<MqttMessage> _messageController =
       StreamController<MqttMessage>.broadcast();
@@ -36,7 +37,8 @@ class MqttTransportImpl implements MqttTransportAdapter {
 
   @override
   Future<void> connect() async {
-    print('[MQTT] 开始连接: host=${_config.host} port=${_config.port} username=${_config.username}');
+    print(
+        '[MQTT] 开始连接: host=${_config.host} port=${_config.port} username=${_config.username}');
     print('[MQTT] 密码长度: ${_config.password.length} chars');
 
     // 桌面端必须用 MqttServerClient（不能直接用 MqttClient）
@@ -53,11 +55,11 @@ class MqttTransportImpl implements MqttTransportAdapter {
     // 日志（调试时临时改为 true）
     client.logging(on: false);
 
-    // Keepalive 60 秒
-    client.keepAlivePeriod = 60;
+    // Keepalive 120 秒（长上传期间减少 PINGREQ 频率）
+    client.keepAlivePeriod = 120;
 
-    // 无 ping 响应 10 秒后主动断开
-    client.disconnectOnNoResponsePeriod = 10;
+    // 无 ping 响应 20 秒后主动断开（给网络拥塞留足缓冲）
+    client.disconnectOnNoResponsePeriod = 40;
 
     // 不自动重连（由 BrokerConnectionManager 控制）
     client.autoReconnect = false;
@@ -79,17 +81,20 @@ class MqttTransportImpl implements MqttTransportAdapter {
         .startClean();
 
     client.connectionMessage = connMsg;
-    print('[MQTT] 连接消息已配置: clientId=${_config.username} keepAlive=60');
+    print('[MQTT] 连接消息已配置: clientId=${_config.username} keepAlive=120');
 
     try {
       print('[MQTT] 调用 client.connect()...');
       final result = await client.connect();
-      print('[MQTT] client.connect() 返回: state=${result?.state} returnCode=${result?.returnCode}');
+      print(
+          '[MQTT] client.connect() 返回: state=${result?.state} returnCode=${result?.returnCode}');
     } catch (e, st) {
       print('[MQTT] ❌ 连接失败: $e');
       print('[MQTT] 异常类型: ${e.runtimeType}');
       print('[MQTT] 堆栈: $st');
-      try { client.disconnect(); } catch (_) {}
+      try {
+        client.disconnect();
+      } catch (_) {}
       rethrow;
     }
 

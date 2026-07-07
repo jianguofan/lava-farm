@@ -15,7 +15,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 
 import '../../data/farm_command_gateway.dart';
-import '../../data/file_uploader.dart';
+import '../../data/file_uploader.dart' show FileUploader, UploadCancelToken;
 
 /// 群控打印中单台打印机的状态
 enum BatchPrintPrinterState {
@@ -35,11 +35,15 @@ class BatchPrintPrinterUpdate {
   final String? error;
   final Duration? elapsed;
 
+  /// 上传进度 0.0 ~ 1.0（仅 uploading 状态有效）
+  final double? uploadProgress;
+
   const BatchPrintPrinterUpdate({
     required this.sn,
     required this.state,
     this.error,
     this.elapsed,
+    this.uploadProgress,
   });
 }
 
@@ -82,6 +86,9 @@ class BatchPrintCoordinator {
   int _startingPrintCount = 0;
 
   final List<String> _failedSns = [];
+
+  /// 每台打印机的上传取消令牌
+  final Map<String, UploadCancelToken> _cancelTokens = {};
 
   Map<String, (String ip, int port, String apiKey)>? _lastConnectionInfo;
   String? _lastFileName;
@@ -139,6 +146,8 @@ class BatchPrintCoordinator {
     _queuedCount = printerSns.length;
     for (final sn in printerSns) {
       _printerStates[sn] = BatchPrintPrinterState.queued;
+      // 通知 UI：每台打印机初始排队状态
+      _updateUI(BatchPrintPrinterUpdate(sn: sn, state: BatchPrintPrinterState.queued));
     }
     _emitProgress();
 
@@ -217,7 +226,20 @@ class BatchPrintCoordinator {
     debugPrint('[BatchPrint] 🏁 重试完成: ${retrySuc}/${failedCopy.length} 成功 elapsed=${retryElapsed.inSeconds}s');
   }
 
+  /// 取消指定打印机的上传
+  void cancelUpload(String sn) {
+    _cancelTokens[sn]?.cancel();
+  }
+
+  /// 取消所有进行中的上传
+  void cancelAllUploads() {
+    for (final token in _cancelTokens.values) {
+      token.cancel();
+    }
+  }
+
   void cancel() {
+    cancelAllUploads();
     _updateController.close();
     _progressController.close();
     _reset();
@@ -251,6 +273,9 @@ class BatchPrintCoordinator {
       _transition(sn, BatchPrintPrinterState.uploading);
       debugPrint('[BatchPrint] $sn: 📤 开始上传 $fileName (${(fileBytes.length / 1024).toStringAsFixed(0)}KB)');
 
+      final cancelToken = UploadCancelToken();
+      _cancelTokens[sn] = cancelToken;
+
       final uploadResult = await _uploader.uploadBytesToPrinter(
         sn: sn,
         ip: info.$1,
@@ -258,7 +283,22 @@ class BatchPrintCoordinator {
         apiKey: info.$3,
         fileName: fileName,
         fileBytes: fileBytes,
+        cancelToken: cancelToken,
+        onProgress: (sent, total) {
+          _updateUI(BatchPrintPrinterUpdate(
+            sn: sn,
+            state: BatchPrintPrinterState.uploading,
+            uploadProgress: total > 0 ? sent / total : 0,
+          ));
+        },
       );
+
+      _cancelTokens.remove(sn);
+
+      if (uploadResult.isCancelled) {
+        _fail(sn, '上传已取消');
+        return;
+      }
 
       final uploadElapsed = DateTime.now().difference(startTime);
       debugPrint('[BatchPrint] $sn: ${uploadResult.success ? "✅" : "❌"} 上传完成 '
@@ -384,6 +424,7 @@ class BatchPrintCoordinator {
     _uploadDoneCount = 0;
     _startingPrintCount = 0;
     _failedSns.clear();
+    _cancelTokens.clear();
   }
 
   static String _fileType(String fileName) {

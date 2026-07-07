@@ -118,6 +118,7 @@ class FarmStore {
     // 从离线恢复 → 更新连接状态
     if (wasOffline) {
       printer.connectionState = FarmConnectionState.online;
+      printer.offlineSince = null; // 清除离线标记
     }
 
     onHeartbeat?.call(sn);
@@ -160,6 +161,7 @@ class FarmStore {
     } else if (event == 'offline') {
       printer.connectionState = FarmConnectionState.offline;
       printer.markTelemetryStale();
+      printer.offlineSince ??= DateTime.now(); // 记录首次离线时间
       printer.addSnapshot(PrinterStateMachine.createOfflineSnapshot(
         now: DateTime.now(),
         reason: 'mqtt_last_will_offline',
@@ -183,6 +185,7 @@ class FarmStore {
 
     printer.connectionState = FarmConnectionState.offline;
     printer.markTelemetryStale();
+    printer.offlineSince ??= DateTime.now(); // 记录首次离线时间
     printer.addSnapshot(PrinterStateMachine.createOfflineSnapshot(
       now: DateTime.now(),
       reason: reason,
@@ -253,6 +256,18 @@ class FarmStore {
   List<FarmPrinterState> get httpFallbackPrinters =>
       _printers.values.where((p) => p.isHttp).toList();
 
+  /// 获取过期设备（离线超过 [threshold] 的打印机）
+  ///
+  /// 典型的 threshold: Duration(hours: 24) 或 Duration(days: 7)
+  List<FarmPrinterState> getExpiredPrinters(Duration threshold) {
+    final now = DateTime.now();
+    return _printers.values.where((p) {
+      if (p.isOnline) return false; // 在线设备不算过期
+      final offlineTime = p.offlineSince ?? p.lastStatusTime;
+      return now.difference(offlineTime) > threshold;
+    }).toList();
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 统计
   // ═══════════════════════════════════════════════════════════
@@ -264,6 +279,10 @@ class FarmStore {
   int get httpCount => _printers.values.where((p) => p.isHttp).length;
   int get httpPrintingCount =>
       _printers.values.where((p) => p.isHttp && p.isPrinting).length;
+
+  /// 离线超过 24 小时的设备数（默认过期阈值）
+  int get expiredCount =>
+      getExpiredPrinters(const Duration(hours: 24)).length;
 
   // ═══════════════════════════════════════════════════════════
   // 持久化支持

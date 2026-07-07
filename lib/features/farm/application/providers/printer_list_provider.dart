@@ -89,3 +89,17 @@ final farmStatsProvider = Provider<FarmStats>((ref) {
     httpCount: printers.where((p) => p.isHttp).length,
   );
 });
+
+/// 过期设备数量（离线超过 24 小时）
+final expiredPrinterCountProvider = Provider<int>((ref) {
+  ref.watch(farmStoreVersionProvider);
+  final store = ref.read(farmStoreProvider);
+  return store.expiredCount;
+});
+
+/// 过期设备列表（离线超过 24 小时）
+final expiredPrintersProvider = Provider<List<FarmPrinterState>>((ref) {
+  ref.watch(farmStoreVersionProvider);
+  final store = ref.read(farmStoreProvider);
+  return store.getExpiredPrinters(const Duration(hours: 24));
+});

@@ -217,6 +217,26 @@ class FarmHub {
     credentialStore.removePrinterCredential(sn);
   }
 
+  /// 批量删除过期设备（离线超过 [threshold] 的设备）
+  ///
+  /// 返回被删除的设备 SN 列表。
+  List<String> removeExpiredPrinters({Duration threshold = const Duration(hours: 24)}) {
+    final expired = store.getExpiredPrinters(threshold);
+    final removed = <String>[];
+
+    for (final printer in expired) {
+      try {
+        removePrinter(printer.sn);
+        removed.add(printer.sn);
+        print('[FarmHub] 🗑️ 已删除过期设备: ${printer.sn} (离线自 ${printer.offlineSince ?? printer.lastStatusTime})');
+      } catch (e) {
+        print('[FarmHub] ⚠️ 删除过期设备 ${printer.sn} 失败: $e');
+      }
+    }
+
+    return removed;
+  }
+
   // ═══════════════════════════════════════════════════════════
   // HTTP 降级后台升级
   // ═══════════════════════════════════════════════════════════

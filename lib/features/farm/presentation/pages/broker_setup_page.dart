@@ -27,7 +27,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
   String? _errorMessage;
 
   // ── 表单 ──
-  final _hostController = TextEditingController(text: '172.18.0.160');
+  final _hostController = TextEditingController(text: '172.18.2.178');
   final _portController = TextEditingController(text: '1883');
   final _usernameController = TextEditingController(text: 'lava_app');
   final _passwordController = TextEditingController(text: 'lava-farm-admin');

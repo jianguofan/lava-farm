@@ -10,6 +10,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/providers/broker_state_provider.dart';
+import '../../application/providers/printer_list_provider.dart';
 import 'broker_setup_page.dart';
 
 /// 应用设置页面
@@ -79,6 +81,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             },
           ),
           ListTile(
+            leading: const Icon(Icons.auto_delete, color: Colors.orange),
+            title: _ExpiredDevicesTile(),
+            subtitle: const Text('删除长期离线的打印机（默认 24 小时）'),
+            onTap: () => _confirmDeleteExpired(),
+          ),
+          ListTile(
             leading: const Icon(Icons.delete_outline, color: Colors.red),
             title: const Text('清除所有打印机', style: TextStyle(color: Colors.red)),
             subtitle: const Text('从本地存储中移除所有已注册的打印机'),
@@ -128,6 +136,54 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
+  /// 删除过期设备确认对话框
+  void _confirmDeleteExpired() {
+    final expiredCount = ref.read(expiredPrinterCountProvider);
+    final expiredPrinters = ref.read(expiredPrintersProvider);
+
+    if (expiredCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('没有过期设备（离线超过 24 小时）')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除过期设备'),
+        content: Text(
+          '检测到 $expiredCount 台设备离线超过 24 小时：\n\n'
+          '${expiredPrinters.map((p) => '• ${p.displayName ?? p.sn} (最后在线: ${_formatTimeAgo(p.lastStatusTime)})').join('\n')}\n\n'
+          '此操作将从系统中移除这些设备，打印机本身不会受到影响。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              final hub = ref.read(farmHubProvider);
+              final removed = hub.removeExpiredPrinters();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('已删除 $removed 台过期设备'),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              }
+            },
+            style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+            child: const Text('确认删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 清除打印机确认对话框
   void _confirmClearPrinters() {
     showDialog(
@@ -146,16 +202,51 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           FilledButton(
             onPressed: () {
               Navigator.pop(ctx);
-              // TODO: 调用 PrinterRegistry.clear()
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('已清除所有打印机信息'),
-                ),
-              );
+              final hub = ref.read(farmHubProvider);
+              final allSns = ref.read(farmStoreProvider).allPrinters.map((p) => p.sn).toList();
+              for (final sn in allSns) {
+                hub.removePrinter(sn);
+              }
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('已清除 ${allSns.length} 台打印机信息')),
+                );
+              }
             },
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('确认清除'),
           ),
+        ],
+      ),
+    );
+  }
+
+  String _formatTimeAgo(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inDays > 0) return '${diff.inDays} 天前';
+    if (diff.inHours > 0) return '${diff.inHours} 小时前';
+    if (diff.inMinutes > 0) return '${diff.inMinutes} 分钟前';
+    return '刚刚';
+  }
+}
+
+/// 过期设备数量标题（响应式）
+class _ExpiredDevicesTile extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(expiredPrinterCountProvider);
+    return Text.rich(
+      TextSpan(
+        children: [
+          const TextSpan(text: '删除过期设备'),
+          if (count > 0)
+            TextSpan(
+              text: '  ($count)',
+              style: TextStyle(
+                color: Colors.orange.shade700,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
         ],
       ),
     );

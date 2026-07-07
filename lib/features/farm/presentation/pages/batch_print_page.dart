@@ -404,25 +404,24 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Text(
                   printer.sn,
                   style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
                 Text(
                   '${printer.ip}:${printer.port}',
                   style: TextStyle(fontSize: 9, color: Colors.grey.shade500),
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 // 摄像头快照
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: SizedBox(
                     width: double.infinity,
-                    height: 80,
+                    height: 64,
                     child: _isInspecting && inspectionResult == null
                         ? Container(
                             color: Colors.grey.shade100,
@@ -836,6 +835,7 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   Widget _buildPrinterItem(String sn, BatchPrintPrinterState state, Color groupColor) {
     final error = _getError(sn);
     final elapsed = _getElapsed(sn);
+    final uploadProgress = _getUploadProgress(sn);
 
     final (statusIcon, statusLabel) = switch (state) {
       BatchPrintPrinterState.queued => (
@@ -844,7 +844,9 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
         ),
       BatchPrintPrinterState.uploading => (
           Icons.cloud_upload_outlined,
-          '上传中',
+          uploadProgress != null
+              ? '${(uploadProgress * 100).toStringAsFixed(0)}%'
+              : '上传中',
         ),
       BatchPrintPrinterState.uploadDone => (
           Icons.cloud_done_outlined,
@@ -875,42 +877,71 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           top: BorderSide(color: groupColor.withOpacity(0.15)),
         ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(statusIcon, size: 14, color: groupColor),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              sn,
-              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (error != null) ...[
-            const SizedBox(width: 6),
-            Flexible(
-              child: Tooltip(
-                message: error,
+          Row(
+            children: [
+              Icon(statusIcon, size: 14, color: groupColor),
+              const SizedBox(width: 6),
+              Expanded(
                 child: Text(
-                  error,
-                  style: TextStyle(fontSize: 10, color: Colors.red.shade400),
+                  sn,
+                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-            ),
-          ],
-          if (elapsed != null) ...[
-            const SizedBox(width: 6),
-            Text(
-              '${elapsed.inSeconds}s',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-            ),
-          ],
-          const SizedBox(width: 6),
-          Text(
-            statusLabel,
-            style: TextStyle(fontSize: 10, color: groupColor),
+              if (error != null) ...[
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Tooltip(
+                    message: error,
+                    child: Text(
+                      error,
+                      style: TextStyle(fontSize: 10, color: Colors.red.shade400),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+              if (elapsed != null) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '${elapsed.inSeconds}s',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                ),
+              ],
+              const SizedBox(width: 6),
+              Text(
+                statusLabel,
+                style: TextStyle(fontSize: 10, color: groupColor),
+              ),
+            ],
           ),
+          // 上传进度条 + 取消按钮
+          if (state == BatchPrintPrinterState.uploading && uploadProgress != null) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: uploadProgress.clamp(0.0, 1.0),
+                      minHeight: 4,
+                      backgroundColor: Colors.grey.shade200,
+                      valueColor: AlwaysStoppedAnimation(groupColor),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () => _coordinator?.cancelUpload(sn),
+                  child: Icon(Icons.close, size: 14, color: Colors.grey.shade500),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -930,6 +961,15 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     for (final update in _updateLog.reversed) {
       if (update.sn == sn && update.elapsed != null) {
         return update.elapsed;
+      }
+    }
+    return null;
+  }
+
+  double? _getUploadProgress(String sn) {
+    for (final update in _updateLog.reversed) {
+      if (update.sn == sn && update.uploadProgress != null) {
+        return update.uploadProgress;
       }
     }
     return null;

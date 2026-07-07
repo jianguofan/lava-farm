@@ -149,6 +149,10 @@ class FarmPrinterState {
   DateTime? lastDataTimestamp;
   DateTime lastStatusTime;
 
+  /// 首次进入离线状态的时间（重新上线后清空）
+  /// 用于判断"过期设备"——长时间离线可被清理
+  DateTime? offlineSince;
+
   // ── 批量操作 ──
   BatchResult? lastBatchResult;
 

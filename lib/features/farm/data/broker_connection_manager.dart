@@ -287,23 +287,27 @@ class BrokerConnectionManager {
   Future<void> _performHealthCheck() async {
     if (_state != BrokerConnState.connected) return;
 
-    // 检查 1: 数据新鲜度 — 超过 30s 没收到任何消息，连接很可能已死
+    // 检查 1: 主动 ping — 真网络往返验证连接存活
+    //
+    // 长 HTTP 上传期间，事件循环忙于 HTTP socket I/O，
+    // lastMessageTime 可能更新延迟，但 ping 是轻量操作不依赖消息流。
+    // ping 通 = 连接存活，无需重连。只有 ping 失败才是真的连接死亡。
+    final pong = await ping();
+    if (!pong) {
+      print('[ConnMgr] ⚠️ ping 失败，标记 degraded 并触发重连');
+      _updateState(BrokerConnState.degraded);
+      _scheduleReconnect();
+      return;
+    }
+
+    // 检查 2: 数据新鲜度 — 仅用于诊断日志，不触发重连
     final lastMsg = _transport?.lastMessageTime;
     if (lastMsg != null) {
       final staleness = DateTime.now().difference(lastMsg);
-      if (staleness.inSeconds > 30) {
-        print('[ConnMgr] ⚠️ 数据断流 ${staleness.inSeconds}s，标记 degraded 并触发重连');
-        _updateState(BrokerConnState.degraded);
-        _scheduleReconnect();
-        return;
+      if (staleness.inSeconds > 120) {
+        // ping 通了说明连接还活着，只是消息延迟（大概率 HTTP 上传占满了事件循环）
+        print('[ConnMgr] ℹ️ 数据断流 ${staleness.inSeconds}s，但 ping 正常，连接存活（可能正在上传文件）');
       }
-    }
-
-    // 检查 2: 主动 ping — 验证底层 MQTT 连接状态
-    final pong = await ping();
-    if (!pong) {
-      _updateState(BrokerConnState.degraded);
-      _scheduleReconnect();
     }
   }
 

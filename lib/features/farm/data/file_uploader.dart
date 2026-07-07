@@ -26,7 +26,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
+
+import 'upload_isolate.dart';
 
 /// 上传结果
 class UploadResult {
@@ -36,17 +39,33 @@ class UploadResult {
   final Duration duration;
   final String? error;
 
+  /// 是否为主动取消
+  final bool isCancelled;
+
   const UploadResult({
     required this.printerSn,
     required this.success,
     this.remoteFileName,
     required this.duration,
     this.error,
+    this.isCancelled = false,
   });
 
   @override
   String toString() =>
-      'UploadResult($printerSn: ${success ? "ok" : "fail"}, ${duration.inMilliseconds}ms)';
+      'UploadResult($printerSn: ${isCancelled ? "cancelled" : success ? "ok" : "fail"}, ${duration.inMilliseconds}ms)';
+}
+
+/// 上传取消令牌
+///
+/// 在上传前创建，上传过程中周期性检查 [isCancelled]。
+/// 调用 [cancel] 后，上传会在下一个分块边界中止。
+class UploadCancelToken {
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() => _cancelled = true;
 }
 
 /// 打印机连接信息 (ip, port, apiKey)
@@ -54,8 +73,11 @@ typedef PrinterConnectionInfo = (String ip, int port, String apiKey);
 
 /// 文件上传器
 class FileUploader {
-  /// 最大并发上传数（文件传输保守设置）
-  static const int maxConcurrent = 5;
+  /// 最大并发上传数
+  ///
+  /// WiFi 环境下多路并发 HTTP 上传会争抢带宽，实测 2 路并发时每台速度最高。
+  /// 有线千兆网络下可调至 5。如需修改，调整此值即可。
+  static const int maxConcurrent = 2;
 
   /// 单文件最大 200MB
   static const int maxFileSize = 200 * 1024 * 1024;
@@ -65,6 +87,9 @@ class FileUploader {
 
   /// 单次上传超时
   static const Duration uploadTimeout = Duration(minutes: 10);
+
+  /// 流式上传的块大小（64KB）
+  static const int uploadChunkSize = 64 * 1024;
 
   // ═══════════════════════════════════════════════════════════
   // 公共 API
@@ -238,8 +263,9 @@ class FileUploader {
   /// 供 [BatchPrintCoordinator] 使用：一次性读取文件后分发给多台打印机，
   /// 避免每台打印机都重新从磁盘读取。
   ///
-  /// [fileBytes] 已读取的文件字节
-  /// [fileName]  远程文件名（如 benchy.3mf）
+  /// [fileBytes]  已读取的文件字节
+  /// [fileName]   远程文件名（如 benchy.3mf）
+  /// [onProgress] 上传进度回调 (sentBytes, totalBytes)，可计算百分比
   Future<UploadResult> uploadBytesToPrinter({
     required String sn,
     required String ip,
@@ -247,6 +273,8 @@ class FileUploader {
     required String apiKey,
     required String fileName,
     required List<int> fileBytes,
+    void Function(int sent, int total)? onProgress,
+    UploadCancelToken? cancelToken,
   }) async {
     if (fileBytes.length > maxFileSize) {
       return UploadResult(
@@ -263,6 +291,8 @@ class FileUploader {
       apiKey: apiKey,
       fileName: fileName,
       fileBytes: fileBytes,
+      onProgress: onProgress,
+      cancelToken: cancelToken,
     );
   }
 
@@ -271,6 +301,9 @@ class FileUploader {
   // ═══════════════════════════════════════════════════════════
 
   /// 上传到单台打印机（含重试）
+  ///
+  /// [onProgress] 上传进度回调 (sentBytes, totalBytes)
+  /// [cancelToken] 取消令牌，设置为 cancelled 后当前分块完成后中止
   Future<UploadResult> _uploadToPrinter({
     required String sn,
     required String ip,
@@ -278,10 +311,23 @@ class FileUploader {
     required String apiKey,
     required String fileName,
     required List<int> fileBytes,
+    void Function(int sent, int total)? onProgress,
+    UploadCancelToken? cancelToken,
   }) async {
     final startTime = DateTime.now();
 
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      // 重试前检查取消
+      if (cancelToken?.isCancelled == true) {
+        return UploadResult(
+          printerSn: sn,
+          success: false,
+          isCancelled: true,
+          duration: DateTime.now().difference(startTime),
+          error: '上传已取消',
+        );
+      }
+
       try {
         final attemptStart = DateTime.now();
         print('[Upload] $sn: 尝试 #${attempt + 1} → http://$ip:$port/server/files/upload');
@@ -292,7 +338,20 @@ class FileUploader {
           apiKey: apiKey,
           fileName: fileName,
           fileBytes: fileBytes,
+          onProgress: (sent, total) => onProgress?.call(sent, total),
+          cancelToken: cancelToken,
         );
+
+        // 上传后被取消
+        if (cancelToken?.isCancelled == true) {
+          return UploadResult(
+            printerSn: sn,
+            success: false,
+            isCancelled: true,
+            duration: DateTime.now().difference(startTime),
+            error: '上传已取消',
+          );
+        }
 
         final uploadMs = DateTime.now().difference(attemptStart).inMilliseconds;
         print('[Upload] $sn: HTTP上传 ${success ? "✅" : "❌"} elapsed=${uploadMs}ms');
@@ -319,6 +378,16 @@ class FileUploader {
           );
         }
       } catch (e) {
+        // 取消导致的异常 → 不重试，直接返回
+        if (cancelToken?.isCancelled == true) {
+          return UploadResult(
+            printerSn: sn,
+            success: false,
+            isCancelled: true,
+            duration: DateTime.now().difference(startTime),
+            error: '上传已取消',
+          );
+        }
         print('[Upload] $sn: ❌ 尝试 #${attempt + 1} 异常: $e');
         if (attempt < maxRetries) {
           final delay = Duration(seconds: (1 << (attempt + 1)));
@@ -338,67 +407,85 @@ class FileUploader {
     );
   }
 
-  /// 执行 HTTP multipart 上传
+  /// 执行 HTTP multipart 上传（Isolate 隔离，不阻塞主线程事件循环）
   ///
-  /// 与 PrintSection._uploadFile() 保持一致的上传格式：
-  /// - Authorization: (空值) — Moonraker LAN 模式要求
-  /// - multipart/form-data，file 字段带 Content-Type: application/octet-stream
-  /// - 无额外 path 字段（上传到根目录）
+  /// 上传逻辑在独立 Isolate 中运行，主线程保持 MQTT 消息正常收发。
+  /// 通过 SendPort/ReceivePort 通信进度和取消信号。
   Future<bool> _doUpload({
     required String ip,
     required int port,
     required String apiKey,
     required String fileName,
     required List<int> fileBytes,
+    void Function(int sent, int total)? onProgress,
+    UploadCancelToken? cancelToken,
   }) async {
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 10);
+    // 启动上传 Isolate
+    final receivePort = ReceivePort();
+    final isolate = await Isolate.spawn(uploadIsolateEntry, receivePort.sendPort);
+
+    // 等待 Isolate 回传自己的 receivePort
+    final isolateSendPort = await receivePort.first as SendPort;
+
+    // 发送上传参数给 Isolate
+    final progressPort = ReceivePort(); // Isolate → Main
+
+    isolateSendPort.send({
+      'ip': ip,
+      'port': port,
+      'fileName': fileName,
+      'fileBytes': Uint8List.fromList(fileBytes),
+      'progressPort': progressPort.sendPort,
+    });
+
+    // 等待 Isolate 回传 cancelPort（用于 Main → Isolate 取消信号）
+    SendPort? cancelSendPort;
+    bool cancelled = false;
+
+    void sendCancel() {
+      if (!cancelled && cancelSendPort != null) {
+        cancelled = true;
+        cancelSendPort!.send('cancel');
+      }
+    }
+
+    // 定时检查取消令牌
+    Timer? cancelTimer;
+    if (cancelToken != null) {
+      cancelTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (cancelToken.isCancelled) sendCancel();
+      });
+    }
 
     try {
-      final uri = Uri.parse('http://$ip:$port/server/files/upload');
-      final request = await client.postUrl(uri);
-      // Moonraker LAN 模式：空 Authorization header
-      request.headers.set('Authorization', '');
+      // 等待 Isolate 完成（期间处理 progress / ready_for_cancel / done 消息）
+      final result = await progressPort.firstWhere((msg) {
+        if (msg is Map<String, dynamic>) {
+          switch (msg['type']) {
+            case 'ready_for_cancel':
+              cancelSendPort = msg['cancelPort'] as SendPort;
+              return false;
+            case 'progress':
+              onProgress?.call(msg['sent'] as int, msg['total'] as int);
+              if (cancelToken?.isCancelled == true) sendCancel();
+              return false;
+            case 'done':
+              return true;
+          }
+        }
+        return false;
+      }) as Map<String, dynamic>;
 
-      // 构建 multipart 请求体（与 PrintSection 一致）
-      final boundary =
-          '----LavaFarmUpload${DateTime.now().millisecondsSinceEpoch}';
-      request.headers.set(
-        'Content-Type',
-        'multipart/form-data; boundary=$boundary',
-      );
-
-      final body = BytesBuilder();
-      body.add(utf8.encode(
-        '--$boundary\r\n'
-        'Content-Disposition: form-data; name="file"; filename="$fileName"\r\n'
-        'Content-Type: application/octet-stream\r\n'
-        '\r\n',
-      ));
-      body.add(fileBytes);
-      body.add(utf8.encode('\r\n--$boundary--\r\n'));
-
-      final bodyBytes = body.toBytes();
-      request.contentLength = bodyBytes.length;
-      request.add(bodyBytes);
-
-      final response = await request.close().timeout(uploadTimeout);
-      client.close();
-
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        final respBody = await response.transform(utf8.decoder).join();
-        final json = jsonDecode(respBody) as Map<String, dynamic>;
-        // Moonraker 响应: {"action":"create_file","item":{...}}
-        //             或: {"result":{"item":{...}}}
-        final item = json['item'] as Map<String, dynamic>?;
-        final resultItem = json['result']?['item'] as Map<String, dynamic>?;
-        return item != null || resultItem != null;
+      final success = result['success'] as bool;
+      if (success) {
+        onProgress?.call(fileBytes.length, fileBytes.length);
       }
-
-      return false;
-    } catch (_) {
-      client.close();
-      rethrow;
+      return success;
+    } finally {
+      cancelTimer?.cancel();
+      progressPort.close();
+      receivePort.close();
+      isolate.kill(priority: Isolate.immediate);
     }
   }
 

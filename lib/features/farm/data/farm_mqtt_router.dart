@@ -377,6 +377,15 @@ class FarmMqttRouter {
 
   /// 活跃 topic 前缀集合（用于诊断哪些设备在发消息）
   final Set<String> _seenTopics = {};
+  /// 无价值的通知类型（不进 Isolate，直接丢弃）
+  ///
+  /// 这些消息频率高但完全未被使用，UTF-8 解码 + JSON 解析纯浪费 CPU。
+  /// payload 字节中匹配到这些字符串则跳过。
+  static const _skippedNotifications = [
+    'notify_camera_monitoring_to_stop',  // 摄像头倒计时 (1条/s/台 × 50条)
+    'notify_system_check_remote',        // 固件更新重复推送
+  ];
+
   DateTime _lastTopicReport = DateTime.now();
 
   void _onMessage(MqttMessage msg) {
@@ -396,6 +405,11 @@ class FarmMqttRouter {
       }
     }
 
+    // 轻量预过滤：notification topic 的 payload 中匹配无用 method 名 → 跳过
+    if (topic.endsWith('/notification') && _shouldSkipNotification(msg.payload)) {
+      return;
+    }
+
     // 交给后台 isolate 异步处理（UTF-8解码 + JSON解析 + Map展平）
     _processor.enqueue(topic, msg.payload);
 
@@ -403,6 +417,34 @@ class FarmMqttRouter {
     if (topic.endsWith('/response')) {
       _processor.flush();
     }
+  }
+
+  /// 检查 payload 是否属于可跳过的 notification
+  ///
+  /// 不做完整 UTF-8 解码，直接用字节匹配 ASCII 字符串。
+  /// `notify_camera_monitoring_to_stop` / `notify_system_check_remote`
+  /// 都是纯 ASCII，字节级匹配足够。
+  bool _shouldSkipNotification(List<int> payload) {
+    for (final pattern in _skippedNotifications) {
+      if (_containsBytes(payload, pattern.codeUnits)) return true;
+    }
+    return false;
+  }
+
+  /// 字节数组包含子序列
+  bool _containsBytes(List<int> data, List<int> pattern) {
+    if (pattern.length > data.length) return false;
+    for (int i = 0; i <= data.length - pattern.length; i++) {
+      bool match = true;
+      for (int j = 0; j < pattern.length; j++) {
+        if (data[i + j] != pattern[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+    return false;
   }
 
   /// isolate 处理完毕后回调（在主 isolate 执行）
