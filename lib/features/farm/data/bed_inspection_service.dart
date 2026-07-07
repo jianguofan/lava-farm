@@ -24,63 +24,7 @@ import 'farm_mqtt_router.dart';
 import 'farm_printer_state.dart';
 
 /// LLM 视觉检测 prompt
-const String _inspectionPrompt = '''### 角色
-
-你是3D打印机内部视觉检测器。分析照片，输出JSON判断床板是否有异物、能否立即打印。
-
-### 异物定义
-
-**是异物**：未取下的打印模型/底座/裙边、耗材废料（炒面、支撑碎片、擦料残余、断丝）、遗落的工具零件（铲刀、扳手、螺丝）、大面积液体/胶水残留（>5cm²）
-
-**不是异物**：床板夹具、调平螺丝、PEI纹理、Logo、网格线、投影、反光、划痕、氧化变色
-
-**粒度**：≥3mm才报告；散落碎片群视为一个异物。
-
-### 输出JSON Schema（严格遵守，仅输出JSON）
-
-你正在检查的打印机序列号是：__PRINTER_SN__。必须在输出中返回这个序列号。
-
-{
-  "inspection": {
-    "sn": "__PRINTER_SN__",
-    "timestamp": "ISO8601",
-    "components": {
-      "print_bed":  {"detected": bool, "confidence": 0.0},
-      "print_head": {"detected": bool, "confidence": 0.0},
-      "casing":     {"detected": bool, "confidence": 0.0}
-    },
-    "bed_foreign_objects": {
-      "has_objects": false,
-      "description": "对异物的中文描述，包含数量、类型、颜色、形状、位置、大致高度。无异物时为空字符串"
-    },
-    "print_readiness": {
-      "is_ready": false,
-      "caution": false,
-      "reason": "判断依据",
-      "recommended_action": "proceed|clean_and_proceed|remove_objects_and_proceed|manual_inspection_required"
-    }
-  }
-}
-
-### 打印就绪判断
-
-| is_ready | caution | 条件                                                         |
-| -------- | ------- | ------------------------------------------------------------ |
-| true     | false   | 床面干净                                                     |
-| true     | true    | 仅有极薄擦料线（高度≈0，<5cm²），不影响首层                  |
-| false    | false   | 有高度≥1mm异物在打印区 / 液体>5cm² / 硬质杂物 / 异物在调平探测区 |
-
-不确定时返回 is_ready=false。
-
-### 边界处理
-
-- 遮挡/反光/过暗 → 在 reason 中说明，降低 confidence
-- 异物堆叠 → 报告最上层高度，注明"下方可能有其他物体"
-- 置信度<0.75 → recommended_action="manual_inspection_required"
-
-### 输出规则
-
-仅输出JSON，禁止markdown围栏、解释文字、无null值，枚举值精确匹配，整数不引号，浮点保留2位。''';
+const String _inspectionPrompt = "你正在检查的打印机序列号是：__PRINTER_SN__。必须在输出中返回这个序列号。";
 
 /// 床板异物检测服务
 class BedInspectionService {
@@ -92,20 +36,20 @@ class BedInspectionService {
     required FarmMqttRouter router,
   })  : _router = router,
         _llmProvider = LLMAdapter(
-          apiKey: 'sk-82e0b17749e74325',
+          apiKey: 'sk-df3d817d7c83417b',
           model: '',
+          streaming: false,
           baseUrl:
-              'http://agent-platform.s.com/api/sap/v1/run/llm/mdl_ac771085',
+              'http://agent-platform.s.com/api/sap/v1/run/agent/agt_9ddb7f58',
           completionsPath: '',
-          temperature: 0.7,
+          temperature: 0.3,
           timeout: const Duration(seconds: 120),
         );
 
   /// 检测单台打印机
   ///
   /// 返回 [BedInspectionResult] 或 null（摄像头不可用、LLM 调用失败等）。
-  Future<BedInspectionResult?> inspectPrinter(
-      FarmPrinterState printer) async {
+  Future<BedInspectionResult?> inspectPrinter(FarmPrinterState printer) async {
     final sn = printer.sn;
     final ip = printer.ip;
     final port = printer.port;
@@ -148,9 +92,12 @@ class BedInspectionService {
       final result = await _callLLM(compressedBytes, sn);
       if (result != null) {
         debugPrint('[BedInspection] $sn: === 检测结果 ===');
-        debugPrint('[BedInspection] $sn: statusSummary=${result.statusSummary}');
-        debugPrint('[BedInspection] $sn: 异物: ${result.bedForeignObjects.description}');
-        debugPrint('[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
+        debugPrint(
+            '[BedInspection] $sn: statusSummary=${result.statusSummary}');
+        debugPrint(
+            '[BedInspection] $sn: 异物: ${result.bedForeignObjects.description}');
+        debugPrint(
+            '[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
         debugPrint('[BedInspection] $sn: 原因: ${result.printReadiness.reason}');
       }
       return result;
@@ -166,7 +113,7 @@ class BedInspectionService {
   /// 流程：
   ///   1. 并发启动所有摄像头（MQTT fire-and-forget）
   ///   2. 统一等待一次（确保摄像头启动完毕）
-  ///   3. 逐个下载快照 + LLM 分析（顺序执行，LLM proxy 不支持并发）
+  ///   3. 并发下载+LLM 分析（semaphore=2，避免单台超时阻塞全部）
   Future<Map<String, BedInspectionResult>> inspectAll(
     List<FarmPrinterState> printers,
   ) async {
@@ -187,16 +134,26 @@ class BedInspectionService {
     // 统一等待一次，确保所有摄像头都就绪
     await Future<void>.delayed(const Duration(milliseconds: 800));
 
-    // Phase 2: 逐个下载+分析（LLM proxy 不支持并发，顺序执行）
-    debugPrint('[BedInspection] Phase 2: 逐个下载+分析 ${onlinePrinters.length} 台…');
-    for (var i = 0; i < onlinePrinters.length; i++) {
-      final printer = onlinePrinters[i];
-      debugPrint('[BedInspection] [${i + 1}/${onlinePrinters.length}] ${printer.sn}');
-      final result = await _downloadAndAnalyze(printer);
-      if (result != null && result.sn.isNotEmpty) {
-        results[result.sn] = result;
-      }
-    }
+    // Phase 2: 并发下载+分析（semaphore=2，单台超时不阻塞其他）
+    debugPrint(
+        '[BedInspection] Phase 2: 并发下载+分析 ${onlinePrinters.length} 台 (并发=2)…');
+    final semaphore = _Semaphore(2);
+    await Future.wait(
+      onlinePrinters.map((printer) async {
+        await semaphore.acquire();
+        try {
+          debugPrint('[BedInspection] ▶ ${printer.sn} 开始');
+          final result = await _downloadAndAnalyze(printer);
+          if (result != null && result.sn.isNotEmpty) {
+            results[result.sn] = result;
+          }
+          debugPrint(
+              '[BedInspection] ◀ ${printer.sn} ${result != null ? "✅" : "❌"}');
+        } finally {
+          semaphore.release();
+        }
+      }),
+    );
 
     debugPrint(
         '[BedInspection] 检测完成: ${results.length}/${onlinePrinters.length} 成功');
@@ -237,8 +194,10 @@ class BedInspectionService {
       // 调用 LLM
       final result = await _callLLM(compressedBytes, sn);
       if (result != null) {
-        debugPrint('[BedInspection] $sn: statusSummary=${result.statusSummary}');
-        debugPrint('[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
+        debugPrint(
+            '[BedInspection] $sn: statusSummary=${result.statusSummary}');
+        debugPrint(
+            '[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
       }
       return result;
     } catch (e, stack) {
@@ -288,7 +247,11 @@ class BedInspectionService {
   /// 图片压缩
   ///
   /// 千问 proxy 限制约 118KB，目标 ≤100KB。
-  /// 缩放策略：最长边 ≤1024px，JPEG quality 从 85 递减至 40。
+  /// 策略：多级缩放 + 递减质量，确保产出 ≤100KB。
+  ///   1. 若原图已 ≤100KB，直接返回
+  ///   2. 逐级缩小尺寸（最长边: 1024 → 800 → 640 → 480）
+  ///   3. 每级遍历质量 [80, 65, 50, 38]，命中 ≤100KB 立即返回
+  ///   4. 最终兜底：480px + quality=25
   Uint8List _compressImage(Uint8List bytes) {
     // 如果已经足够小，直接返回
     if (bytes.length <= 100 * 1024) return bytes;
@@ -303,26 +266,41 @@ class BedInspectionService {
       // 检查尺寸合法性（千问要求 >10px）
       if (originalWidth <= 10 || originalHeight <= 10) return bytes;
 
-      // 缩放
-      img.Image resized = decoded;
-      const maxDimension = 1024;
-      if (originalWidth > maxDimension || originalHeight > maxDimension) {
-        resized = img.copyResize(decoded,
-            width: originalWidth > originalHeight ? maxDimension : null,
-            height: originalHeight > originalWidth ? maxDimension : null,
-            interpolation: img.Interpolation.average);
-      }
+      // 多级缩放 → 递减质量（外层尺寸优先，内层质量优先）
+      const dimensions = [1024, 800, 640, 480];
+      const qualities = [80, 65, 50, 38];
 
-      // 递减质量编码
-      for (final quality in [85, 70, 55, 40]) {
-        final encoded = img.encodeJpg(resized, quality: quality);
-        if (encoded.length <= 100 * 1024) {
-          return Uint8List.fromList(encoded);
+      for (final maxDim in dimensions) {
+        // 仅在需要时缩放
+        img.Image candidate = decoded;
+        if (originalWidth > maxDim || originalHeight > maxDim) {
+          candidate = img.copyResize(decoded,
+              width: originalWidth > originalHeight ? maxDim : null,
+              height: originalHeight > originalWidth ? maxDim : null,
+              interpolation: img.Interpolation.average);
+        }
+
+        for (final quality in qualities) {
+          final encoded = img.encodeJpg(candidate, quality: quality);
+          if (encoded.length <= 100 * 1024) {
+            debugPrint(
+                '[BedInspection] 压缩完成: ${originalWidth}x$originalHeight → '
+                '${candidate.width}x${candidate.height} quality=$quality '
+                '${(encoded.length / 1024).toStringAsFixed(1)}KB');
+            return Uint8List.fromList(encoded);
+          }
         }
       }
 
-      // 最后尝试最低质量
-      final encoded = img.encodeJpg(resized, quality: 30);
+      // 最终兜底：最小尺寸 + 最低质量
+      final finalImg = img.copyResize(decoded,
+          width: originalWidth > originalHeight ? 480 : null,
+          height: originalHeight > originalWidth ? 480 : null,
+          interpolation: img.Interpolation.average);
+      final encoded = img.encodeJpg(finalImg, quality: 25);
+      debugPrint(
+          '[BedInspection] 兜底压缩: ${finalImg.width}x${finalImg.height} quality=25 '
+          '${(encoded.length / 1024).toStringAsFixed(1)}KB');
       return Uint8List.fromList(encoded);
     } catch (e) {
       debugPrint('[BedInspection] 图片压缩失败: $e');
@@ -331,8 +309,7 @@ class BedInspectionService {
   }
 
   /// 调用 LLM API 分析图片
-  Future<BedInspectionResult?> _callLLM(
-      Uint8List imageBytes, String sn) async {
+  Future<BedInspectionResult?> _callLLM(Uint8List imageBytes, String sn) async {
     try {
       final base64Data = base64Encode(imageBytes);
       final imagePart = ContentPart.imageBase64(
@@ -341,6 +318,7 @@ class BedInspectionService {
         detail: 'auto',
       );
 
+      // 注入真实的打印机 SN 到 prompt 中
       final promptWithSn = _inspectionPrompt.replaceAll('__PRINTER_SN__', sn);
 
       final messages = [
@@ -354,15 +332,25 @@ class BedInspectionService {
       ];
 
       debugPrint('[BedInspection] $sn: 调用 LLM…');
-      final events = await _llmProvider
-          .chat(messages: messages, tools: const [])
-          .timeout(const Duration(seconds: 120));
 
-      // 从 events 中提取文本
+      final events = await _llmProvider.chat(
+          messages: messages,
+          tools: const []).timeout(const Duration(seconds: 120));
+
+      debugPrint('[BedInspection] $sn: 收到 ${events.length} 个事件');
+
+      // 从 events 中提取文本 + 诊断所有事件类型
       final textBuffer = StringBuffer();
       for (final event in events) {
         if (event is TextDelta) {
           textBuffer.write(event.text);
+        } else if (event is StreamError) {
+          debugPrint('[BedInspection] $sn: ⚠️ StreamError: ${event.message}');
+        } else if (event is ReasoningDelta) {
+          debugPrint(
+              '[BedInspection] $sn: 💭 Reasoning: ${event.text.substring(0, event.text.length.clamp(0, 100))}');
+        } else {
+          debugPrint('[BedInspection] $sn: 📋 ${event.runtimeType}: $event');
         }
       }
 
@@ -401,7 +389,8 @@ class BedInspectionService {
         return BedInspectionResult.fromJson(json);
       } catch (e) {
         debugPrint('[BedInspection] $sn: JSON 解析失败 — $e');
-        debugPrint('[BedInspection] 原始响应: ${text.substring(0, text.length.clamp(0, 500))}');
+        debugPrint(
+            '[BedInspection] 原始响应: ${text.substring(0, text.length.clamp(0, 500))}');
         return null;
       }
     }
@@ -410,5 +399,31 @@ class BedInspectionService {
   void dispose() {
     _httpClient.close();
     _llmProvider.dispose();
+  }
+}
+
+/// 简单信号量（避免跨文件导入）
+class _Semaphore {
+  int _permits;
+  final List<Completer<void>> _waiters = [];
+
+  _Semaphore(int maxPermits) : _permits = maxPermits;
+
+  Future<void> acquire() async {
+    if (_permits > 0) {
+      _permits--;
+      return;
+    }
+    final completer = Completer<void>();
+    _waiters.add(completer);
+    await completer.future;
+    _permits--;
+  }
+
+  void release() {
+    _permits++;
+    if (_waiters.isNotEmpty) {
+      _waiters.removeAt(0).complete();
+    }
   }
 }

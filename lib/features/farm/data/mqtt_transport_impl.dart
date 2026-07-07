@@ -22,6 +22,12 @@ class MqttTransportImpl implements MqttTransportAdapter {
   final StreamController<MqttMessage> _messageController =
       StreamController<MqttMessage>.broadcast();
 
+  @override
+  void Function()? onDisconnected;
+
+  @override
+  DateTime? lastMessageTime;
+
   MqttTransportImpl(this._config);
 
   // ═══════════════════════════════════════════════════════════
@@ -58,6 +64,7 @@ class MqttTransportImpl implements MqttTransportAdapter {
 
     client.onDisconnected = () {
       print('[MQTT] ⚠️ 非预期断开 (onDisconnected)');
+      onDisconnected?.call();
     };
     client.onConnected = () {
       print('[MQTT] ✓ onConnected 回调触发');
@@ -142,6 +149,7 @@ class MqttTransportImpl implements MqttTransportAdapter {
 
   void _onUpdates(List<mqtt.MqttReceivedMessage<mqtt.MqttMessage>> messages) {
     _msgCount += messages.length;
+    lastMessageTime = DateTime.now();
 
     for (final msg in messages) {
       // 提取 payload 字节

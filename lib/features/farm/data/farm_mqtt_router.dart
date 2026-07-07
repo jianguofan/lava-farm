@@ -120,9 +120,12 @@ class FarmMqttRouter {
     // 对已注册设备发送 printer.objects.subscribe 激活状态推送
     // Snapmaker 的 status_interval 配置已让打印机自动推送大部分状态，
     // 但 subscribe 确保所有需要的对象都被推送
+    // 重连时也需要重新订阅（打印机可能已重启或 subscription 过期）
     for (final device in _store.allPrinters) {
       _subscribeDeviceObjects(device.sn);
     }
+
+    print('[Router] ✅ start() 完成: 已订阅 +/status, +/notification, 设备数=${_store.allPrinters.length}');
   }
 
   /// 启动元数据定期刷新
@@ -143,7 +146,7 @@ class FarmMqttRouter {
 
   /// 停止路由
   Future<void> stop() async {
-    _started = false;
+    _started = false;  // 重连后可再次 start()
     _probeTimer?.cancel();
     _probeTimer = null;
     _ipResolveTimer?.cancel();
@@ -251,16 +254,13 @@ class FarmMqttRouter {
           'extruder': null,
           'heater_bed': null,
           'print_stats': null,
-          'job': null,
           'virtual_sdcard': null,
           'toolhead': null,
           'fan': null,
           'display_status': null,
           'gcode_move': null,
           'idle_timeout': null,
-          'file_metadata': null,
           'webhooks': null,
-          'filament_detect': null,
         },
       });
       if (fullState.success && fullState.data != null) {
@@ -353,20 +353,17 @@ class FarmMqttRouter {
     try {
       await sendCommand(sn, 'printer.objects.subscribe', {
         'objects': {
-          // 核心 13 对象：去掉 motion_report（打印时高频）+ machine_state_manager（同高频）
+          // 核心 10 对象：去掉 job/file_metadata（始终为空）、filament_detect（RFID 静态数据 ~2KB）
           'extruder': null,
           'heater_bed': null,
           'print_stats': null,
-          'job': null,
           'virtual_sdcard': null,
           'toolhead': null,
           'fan': null,
           'display_status': null,
           'gcode_move': null,
           'idle_timeout': null,
-          'file_metadata': null,
           'webhooks': null,
-          'filament_detect': null,
         },
       });
     } catch (_) {

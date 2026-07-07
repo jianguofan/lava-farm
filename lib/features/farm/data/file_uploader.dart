@@ -283,6 +283,9 @@ class FileUploader {
 
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
+        final attemptStart = DateTime.now();
+        print('[Upload] $sn: 尝试 #${attempt + 1} → http://$ip:$port/server/files/upload');
+
         final success = await _doUpload(
           ip: ip,
           port: port,
@@ -291,8 +294,12 @@ class FileUploader {
           fileBytes: fileBytes,
         );
 
+        final uploadMs = DateTime.now().difference(attemptStart).inMilliseconds;
+        print('[Upload] $sn: HTTP上传 ${success ? "✅" : "❌"} elapsed=${uploadMs}ms');
+
         if (success) {
-          // 上传后校验（可选）
+          // 上传后校验
+          final verifyStart = DateTime.now();
           final verified = await _verifyUpload(
             ip: ip,
             port: port,
@@ -300,6 +307,8 @@ class FileUploader {
             fileName: fileName,
             expectedSize: fileBytes.length,
           );
+          final verifyMs = DateTime.now().difference(verifyStart).inMilliseconds;
+          print('[Upload] $sn: 校验 ${verified ? "✅" : "⚠️"} elapsed=${verifyMs}ms');
 
           return UploadResult(
             printerSn: sn,
@@ -310,13 +319,17 @@ class FileUploader {
           );
         }
       } catch (e) {
+        print('[Upload] $sn: ❌ 尝试 #${attempt + 1} 异常: $e');
         if (attempt < maxRetries) {
-          // 指数退避重试: 2s, 4s
-          await Future.delayed(Duration(seconds: (1 << (attempt + 1))));
+          final delay = Duration(seconds: (1 << (attempt + 1)));
+          print('[Upload] $sn: 重试等待 ${delay.inSeconds}s...');
+          await Future.delayed(delay);
         }
       }
     }
 
+    final totalMs = DateTime.now().difference(startTime).inMilliseconds;
+    print('[Upload] $sn: ❌ 最终失败（重试${maxRetries}次后），总耗时=${totalMs}ms');
     return UploadResult(
       printerSn: sn,
       success: false,

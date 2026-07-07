@@ -142,6 +142,10 @@ class BatchPrintCoordinator {
     }
     _emitProgress();
 
+    final fileSizeKB = (fileBytes.length / 1024).toStringAsFixed(0);
+    debugPrint('[BatchPrint] 🚀 开始群控打印: ${printerSns.length}台, 文件=${remoteFileName} (${fileSizeKB}KB)');
+
+    final execStart = DateTime.now();
     final semaphore = _Semaphore(FileUploader.maxConcurrent);
     final futures = <Future<void>>[];
 
@@ -159,6 +163,11 @@ class BatchPrintCoordinator {
     }
 
     await Future.wait(futures);
+
+    final execElapsed = DateTime.now().difference(execStart);
+    final successes = _printerStates.values.where((s) => s == BatchPrintPrinterState.success).length;
+    final failures = _printerStates.values.where((s) => s == BatchPrintPrinterState.uploadFailed || s == BatchPrintPrinterState.printFailed).length;
+    debugPrint('[BatchPrint] 🏁 群控打印完成: total=${printerSns.length} ✅=$successes ❌=$failures elapsed=${execElapsed.inSeconds}s');
   }
 
   /// 重试失败的打印机
@@ -183,6 +192,8 @@ class BatchPrintCoordinator {
     }
     _emitProgress();
 
+    debugPrint('[BatchPrint] 🔄 重试失败项: ${failedCopy.length}台');
+    final retryStart = DateTime.now();
     final semaphore = _Semaphore(FileUploader.maxConcurrent);
     final futures = <Future<void>>[];
 
@@ -200,6 +211,10 @@ class BatchPrintCoordinator {
     }
 
     await Future.wait(futures);
+
+    final retryElapsed = DateTime.now().difference(retryStart);
+    final retrySuc = _printerStates.values.where((s) => s == BatchPrintPrinterState.success).length;
+    debugPrint('[BatchPrint] 🏁 重试完成: ${retrySuc}/${failedCopy.length} 成功 elapsed=${retryElapsed.inSeconds}s');
   }
 
   void cancel() {
@@ -222,6 +237,7 @@ class BatchPrintCoordinator {
     required _Semaphore semaphore,
     required FarmCommandGateway gateway,
   }) async {
+    final pipelineStart = DateTime.now();
     await semaphore.acquire();
     try {
       final info = connectionInfo[sn];
@@ -232,7 +248,8 @@ class BatchPrintCoordinator {
 
       final startTime = DateTime.now();
 
-      _transition(sn, BatchPrintPrinterState.uploading); // queued → uploading
+      _transition(sn, BatchPrintPrinterState.uploading);
+      debugPrint('[BatchPrint] $sn: 📤 开始上传 $fileName (${(fileBytes.length / 1024).toStringAsFixed(0)}KB)');
 
       final uploadResult = await _uploader.uploadBytesToPrinter(
         sn: sn,
@@ -243,6 +260,11 @@ class BatchPrintCoordinator {
         fileBytes: fileBytes,
       );
 
+      final uploadElapsed = DateTime.now().difference(startTime);
+      debugPrint('[BatchPrint] $sn: ${uploadResult.success ? "✅" : "❌"} 上传完成 '
+          'elapsed=${uploadElapsed.inMilliseconds}ms '
+          'speed=${(fileBytes.length / 1024 / uploadElapsed.inMilliseconds * 1000).toStringAsFixed(0)}KB/s');
+
       if (!uploadResult.success) {
         final err = uploadResult.error ?? '上传失败';
         _fail(sn, err);
@@ -252,7 +274,8 @@ class BatchPrintCoordinator {
       _transition(sn, BatchPrintPrinterState.uploadDone);
 
       _transition(sn, BatchPrintPrinterState.startingPrint);
-      debugPrint('[BatchPrint] $sn: 发送打印命令 type=$fileType path=$fileName plate=$printPlate');
+      final printStart = DateTime.now();
+      debugPrint('[BatchPrint] $sn: 🖨️ 发送打印命令 type=$fileType path=$fileName plate=$printPlate');
 
       final printResult = await gateway.sendToOne(
         sn: sn,
@@ -264,15 +287,22 @@ class BatchPrintCoordinator {
         },
       );
 
-      debugPrint('[BatchPrint] $sn: 打印命令结果 success=${printResult.success} error=${printResult.error}');
+      final printElapsed = DateTime.now().difference(printStart);
+      debugPrint('[BatchPrint] $sn: ${printResult.success ? "✅" : "❌"} 打印命令结果 '
+          'success=${printResult.success} error=${printResult.error} '
+          'elapsed=${printElapsed.inMilliseconds}ms');
 
       if (printResult.success) {
+        final totalElapsed = DateTime.now().difference(pipelineStart);
+        debugPrint('[BatchPrint] $sn: 🎉 全部完成! upload=${uploadElapsed.inMilliseconds}ms '
+            'print=${printElapsed.inMilliseconds}ms total=${totalElapsed.inMilliseconds}ms');
         _transition(sn, BatchPrintPrinterState.success,
             elapsed: DateTime.now().difference(startTime));
       } else {
         _fail(sn, printResult.error ?? 'unknown');
       }
     } catch (e) {
+      debugPrint('[BatchPrint] $sn: 💥 异常: $e');
       _fail(sn, e.toString());
     } finally {
       semaphore.release();

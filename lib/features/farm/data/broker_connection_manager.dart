@@ -157,6 +157,14 @@ class BrokerConnectionManager {
       print('[ConnMgr] Transport 创建成功, 调用 transport.connect()...');
       await _transport!.connect();
       print('[ConnMgr] transport.connect() 成功!');
+
+      // 注入非预期断开回调：TCP 断开时立即感知并触发重连（不等 15s 健康检查）
+      _transport!.onDisconnected = () {
+        print('[ConnMgr] ⚠️ transport 非预期断开，立即触发重连');
+        _updateState(BrokerConnState.disconnected);
+        _scheduleReconnect();
+      };
+
       _updateState(BrokerConnState.connected);
       _startHealthCheck();
     } catch (e, st) {
@@ -279,10 +287,22 @@ class BrokerConnectionManager {
   Future<void> _performHealthCheck() async {
     if (_state != BrokerConnState.connected) return;
 
+    // 检查 1: 数据新鲜度 — 超过 30s 没收到任何消息，连接很可能已死
+    final lastMsg = _transport?.lastMessageTime;
+    if (lastMsg != null) {
+      final staleness = DateTime.now().difference(lastMsg);
+      if (staleness.inSeconds > 30) {
+        print('[ConnMgr] ⚠️ 数据断流 ${staleness.inSeconds}s，标记 degraded 并触发重连');
+        _updateState(BrokerConnState.degraded);
+        _scheduleReconnect();
+        return;
+      }
+    }
+
+    // 检查 2: 主动 ping — 验证底层 MQTT 连接状态
     final pong = await ping();
     if (!pong) {
       _updateState(BrokerConnState.degraded);
-      // 触发重连
       _scheduleReconnect();
     }
   }
@@ -326,7 +346,7 @@ abstract class MqttTransportAdapter {
   /// 断开连接
   Future<void> disconnect();
 
-  /// MQTT PING 请求
+  /// MQTT PING 请求（实际网络往返检测，非仅状态查询）
   Future<void> ping();
 
   /// 订阅 topic
@@ -337,6 +357,13 @@ abstract class MqttTransportAdapter {
 
   /// 消息流
   Stream<MqttMessage> get messageStream;
+
+  /// 底层 TCP 非预期断开回调（keepalive 超时 / TCP RST 等）
+  /// BrokerConnectionManager 在 connect() 后注入，用于立即触发重连
+  void Function()? onDisconnected;
+
+  /// 最近一次收到消息的时间（由 _onUpdates 更新）
+  DateTime? lastMessageTime;
 }
 
 /// MQTT 消息
