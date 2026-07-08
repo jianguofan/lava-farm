@@ -1,15 +1,11 @@
-/// 群控打印页面
+/// 群控打印页面（四步投产流程）
+///
+/// Step1 - 选择产品: 从产品库选取或直接选文件
+/// Step2 - 确认材料: 颜色、克重等耗材参数
+/// Step3 - 选择设备: 过滤机型/状态，多选打印机 + 床板检测
+/// Step4 - 执行投产: 批量上传 + 打印 + 结果汇总
 ///
 /// 供用户选择多台打印机 + 3MF/GCode 文件，批量上传并发起打印。
-///
-/// 功能:
-///   1. 选择文件（.3mf / .gcode / .zip）
-///   2. 勾选目标打印机（在线可选，离线灰显）
-///   3. 床板异物检测（摄像头快照 + LLM 视觉分析）
-///   4. 设置打印选项（plate_id 等）
-///   5. 点击"开始打印" → BatchPrintCoordinator 执行
-///   6. 实时显示每台打印机的上传/打印进度
-///   7. 完成后显示汇总 + 重试失败项
 
 import 'dart:io';
 
@@ -20,26 +16,41 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../application/providers/bed_inspection_provider.dart';
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
+import '../../application/providers/product_provider.dart';
 import '../../application/services/batch_print_coordinator.dart';
 import '../../data/farm_printer_state.dart';
 import '../../domain/models/bed_inspection_result.dart';
+import '../../domain/models/product_definition.dart';
+import '../../domain/models/product_material.dart';
 
 /// 群控打印页面
 class BatchPrintPage extends ConsumerStatefulWidget {
   /// 从仪表盘传入的预选打印机 SN 列表（可选）
   final Set<String> initialSns;
 
-  const BatchPrintPage({super.key, this.initialSns = const {}});
+  /// 从产品中心传入的产品 ID（可选）
+  final String? productId;
+
+  const BatchPrintPage({super.key, this.initialSns = const {}, this.productId});
 
   @override
   ConsumerState<BatchPrintPage> createState() => _BatchPrintPageState();
 }
 
 class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
-  // ── 选择状态 ──
-  final _selectedSns = <String>{};
+  // ── 步骤状态 ──
+  int _currentStep = 0;
+
+  // ── Step1: 产品/文件选择 ──
+  ProductDefinition? _selectedProduct;
   String? _filePath;
   String? _fileName;
+
+  // ── Step2: 材料确认 ──
+  List<ProductMaterial> _materials = [];
+
+  // ── Step3: 打印机选择 ──
+  final _selectedSns = <String>{};
   int _printPlate = 1;
 
   // ── 执行状态 ──
@@ -60,6 +71,25 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   void initState() {
     super.initState();
     _selectedSns.addAll(widget.initialSns);
+
+    // 如果从产品中心跳转，加载产品并跳到 Step2
+    if (widget.productId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _initFromProduct());
+    }
+  }
+
+  Future<void> _initFromProduct() async {
+    final products = ref.read(productListProvider);
+    final product = products.where((p) => p.id == widget.productId).firstOrNull;
+    if (product != null && mounted) {
+      setState(() {
+        _selectedProduct = product;
+        _filePath = product.sourceFilePath;
+        _fileName = product.name;
+        _materials = List.from(product.materials);
+        _currentStep = 1; // 跳到材料确认
+      });
+    }
   }
 
   @override
@@ -80,7 +110,6 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
 
     // 监听检测状态
     _isInspecting = ref.watch(bedInspectionLoadingProvider);
-    // 触发检测结果重建（只取 results map）
     final inspectionResults = ref.watch(bedInspectionResultsMapProvider);
 
     // 筛选可用打印机（在线 + 有 IP 才可选）
@@ -108,66 +137,353 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       ),
       body: Column(
         children: [
-          // ── 文件选择 ──
-          _buildFileSection(),
+          // ── 四步 Stepper ──
+          _buildStepper(),
 
           const Divider(height: 1),
 
-          // ── 打印机选择 ──
-          _buildPrinterSection(readyPrinters, pendingPrinters, offlinePrinters, inspectionResults),
+          // ── 当前步骤内容 ──
+          Expanded(child: _buildStepContent(
+            readyPrinters, pendingPrinters, offlinePrinters, inspectionResults, gateway)),
+        ],
+      ),
+    );
+  }
 
-          const Divider(height: 1),
+  /// 构建步骤指示器
+  Widget _buildStepper() {
+    final steps = ['选择产品', '确认材料', '选择设备', '执行投产'];
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLowest,
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < steps.length; i++) ...[
+            if (i > 0) ...[
+              const SizedBox(width: 4),
+              Expanded(
+                child: Container(
+                  height: 2,
+                  color: i <= _currentStep
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.grey.shade300,
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            _StepCircle(
+              step: i + 1,
+              label: steps[i],
+              isActive: i == _currentStep,
+              isDone: i < _currentStep,
+              enabled: i <= _currentStep || (i == _currentStep + 1 && _canAdvanceTo(i)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
-          // ── 打印选项 ──
-          _buildOptionsSection(),
+  bool _canAdvanceTo(int step) {
+    switch (step) {
+      case 1: return _filePath != null;
+      case 2: return _materials.isNotEmpty;
+      case 3: return _selectedSns.isNotEmpty;
+      default: return false;
+    }
+  }
 
-          const Divider(height: 1),
+  /// 构建当前步骤内容
+  Widget _buildStepContent(
+    List<FarmPrinterState> readyPrinters,
+    List<FarmPrinterState> pendingPrinters,
+    List<FarmPrinterState> offlinePrinters,
+    Map<String, BedInspectionResult> inspectionResults,
+    dynamic gateway,
+  ) {
+    switch (_currentStep) {
+      case 0:
+        return _buildProductStep();
+      case 1:
+        return _buildMaterialStep();
+      case 2:
+        return _buildPrinterStep(readyPrinters, pendingPrinters, offlinePrinters, inspectionResults, gateway);
+      case 3:
+        return _buildExecutionStep(gateway, readyPrinters);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
 
-          // ── 操作按钮 ──
-          _buildActionButton(gateway != null, readyPrinters),
+  // ═══════════════════════════════════════════════════════════
+  // Step 1: 产品选择
+  // ═══════════════════════════════════════════════════════════
 
-          // ── 进度显示 ──
-          if (_isExecuting || _isDone) Expanded(child: _buildProgressSection()),
+  Widget _buildProductStep() {
+    final productsAsync = ref.watch(productProvider);
 
-          // ── 完成操作栏 ──
-          if (_isDone) _buildDoneBar(),
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 文件选择
+          Row(
+            children: [
+              const Icon(Icons.insert_drive_file_outlined, size: 20),
+              const SizedBox(width: 8),
+              const Text('选择文件', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _fileName != null
+                    ? Chip(
+                        avatar: const Icon(Icons.check_circle, size: 18, color: Colors.green),
+                        label: Text(_fileName!, style: const TextStyle(fontSize: 13)),
+                        onDeleted: _isExecuting ? null : () => setState(() {
+                          _filePath = null;
+                          _fileName = null;
+                          _selectedProduct = null;
+                        }),
+                      )
+                    : OutlinedButton.icon(
+                        icon: const Icon(Icons.folder_open, size: 18),
+                        label: const Text('选择 3MF / GCode 文件'),
+                        onPressed: _isExecuting ? null : _pickFile,
+                      ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text('或从产品库中选择', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+          const SizedBox(height: 8),
+          // 产品库网格
+          Expanded(
+            child: productsAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Text('加载失败: $e'),
+              data: (products) {
+                if (products.isEmpty) {
+                  return Center(
+                    child: Text('暂无产品，请先导入', style: TextStyle(color: Colors.grey.shade500)),
+                  );
+                }
+                return GridView.builder(
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 260,
+                    mainAxisExtent: 120,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                  ),
+                  itemCount: products.length,
+                  itemBuilder: (context, index) {
+                    final product = products[index];
+                    final isSelected = _selectedProduct?.id == product.id;
+                    return Card(
+                      elevation: isSelected ? 3 : 1,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        side: BorderSide(
+                          color: isSelected ? Colors.blue : Colors.transparent,
+                          width: isSelected ? 2 : 1,
+                        ),
+                      ),
+                      child: InkWell(
+                        onTap: () => setState(() {
+                          _selectedProduct = product;
+                          _filePath = product.sourceFilePath;
+                          _fileName = product.name;
+                          _materials = List.from(product.materials);
+                        }),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      product.displayName,
+                                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (isSelected)
+                                    const Icon(Icons.check_circle, size: 18, color: Colors.blue),
+                                ],
+                              ),
+                              const Spacer(),
+                              Text(product.machineModel,
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                              Text('${product.totalFilamentGrams.toStringAsFixed(1)}g · ${product.plateQuantity}盘',
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                              if (product.materials.isNotEmpty)
+                                Row(
+                                  children: product.materials.take(3).map((m) => Padding(
+                                    padding: const EdgeInsets.only(right: 4),
+                                    child: Container(
+                                      width: 10,
+                                      height: 10,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Color(m.argb),
+                                        border: Border.all(color: Colors.grey.shade300),
+                                      ),
+                                    ),
+                                  )).toList(),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 文件选择
+  // Step 2: 材料确认
   // ═══════════════════════════════════════════════════════════
 
-  Widget _buildFileSection() {
+  Widget _buildMaterialStep() {
+    if (_materials.isEmpty && _selectedProduct != null) {
+      _materials = List.from(_selectedProduct!.materials);
+    }
+
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.insert_drive_file_outlined, size: 20),
-          const SizedBox(width: 8),
-          const Text('选择文件', style: TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: _fileName != null
-                ? Chip(
-                    avatar: const Icon(Icons.check_circle, size: 18, color: Colors.green),
-                    label: Text(_fileName!, style: const TextStyle(fontSize: 13)),
-                    onDeleted: _isExecuting ? null : () => setState(() {
-                      _filePath = null;
-                      _fileName = null;
-                    }),
-                  )
-                : OutlinedButton.icon(
-                    icon: const Icon(Icons.folder_open, size: 18),
-                    label: const Text('选择 3MF / GCode 文件'),
-                    onPressed:
-                        _isExecuting ? null : _pickFile,
-                  ),
+          Row(
+            children: [
+              const Icon(Icons.palette_outlined, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                '确认耗材配置${_selectedProduct != null ? " — ${_selectedProduct!.displayName}" : ""}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ],
           ),
+          const SizedBox(height: 16),
+          if (_materials.isEmpty)
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.inventory_outlined, size: 48, color: Colors.grey.shade300),
+                    const SizedBox(height: 8),
+                    const Text('未检测到耗材信息'),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('添加耗材'),
+                      onPressed: () => setState(() => _materials.add(
+                        ProductMaterial(colorName: '默认', argb: 0xFF9E9E9E, grams: 0),
+                      )),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            Expanded(
+              child: ListView(
+                children: [
+                  for (var i = 0; i < _materials.length; i++)
+                    _MaterialRow(
+                      material: _materials[i],
+                      index: i,
+                      onChanged: (m) => setState(() => _materials[i] = m),
+                      onDelete: () => setState(() => _materials.removeAt(i)),
+                    ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.add, size: 16),
+                    label: const Text('添加耗材'),
+                    onPressed: () => setState(() => _materials.add(
+                      ProductMaterial(colorName: '新增耗材', argb: 0xFF9E9E9E, grams: 0),
+                    )),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // Step 3: 打印机选择
+  // ═══════════════════════════════════════════════════════════
+
+  Widget _buildPrinterStep(
+    List<FarmPrinterState> readyPrinters,
+    List<FarmPrinterState> pendingPrinters,
+    List<FarmPrinterState> offlinePrinters,
+    Map<String, BedInspectionResult> inspectionResults,
+    dynamic gateway,
+  ) {
+    return Column(
+      children: [
+        // 打印机选择区域
+        _buildPrinterSection(readyPrinters, pendingPrinters, offlinePrinters, inspectionResults),
+
+        const Divider(height: 1),
+
+        // 打印选项
+        _buildOptionsSection(),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // Step 4: 执行投产
+  // ═══════════════════════════════════════════════════════════
+
+  Widget _buildExecutionStep(dynamic gateway, List<FarmPrinterState> readyPrinters) {
+    return Column(
+      children: [
+        // 操作按钮
+        _buildActionButton(gateway != null, readyPrinters),
+
+        // 进度显示
+        if (_isExecuting || _isDone) Expanded(child: _buildProgressSection()),
+
+        // 完成操作栏
+        if (_isDone) _buildDoneBar(),
+
+        // 待执行状态提示
+        if (!_isExecuting && !_isDone)
+          Expanded(
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.rocket_launch_outlined, size: 64, color: Colors.grey.shade300),
+                  const SizedBox(height: 12),
+                  const Text('确认无误后，点击下方按钮开始投产'),
+                  const SizedBox(height: 4),
+                  Text(
+                    '将对 ${_selectedSns.length} 台设备批量上传并启动打印',
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -1320,6 +1636,154 @@ class _Stat extends StatelessWidget {
         Text('$label ', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
         Text('$count', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
       ],
+    );
+  }
+}
+
+/// 步骤圆圈指示器
+class _StepCircle extends StatelessWidget {
+  final int step;
+  final String label;
+  final bool isActive;
+  final bool isDone;
+  final bool enabled;
+
+  const _StepCircle({
+    required this.step,
+    required this.label,
+    required this.isActive,
+    required this.isDone,
+    required this.enabled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isActive || isDone
+        ? Theme.of(context).colorScheme.primary
+        : Colors.grey.shade400;
+
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.4,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isActive
+                  ? color
+                  : isDone
+                      ? color.withOpacity(0.15)
+                      : Colors.grey.shade200,
+              border: Border.all(color: color, width: 2),
+            ),
+            child: Center(
+              child: isDone
+                  ? Icon(Icons.check, size: 16, color: color)
+                  : Text(
+                      '$step',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: isActive ? Colors.white : color,
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: isActive ? FontWeight.w700 : FontWeight.normal,
+              color: isActive ? color : Colors.grey.shade600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 材料编辑行
+class _MaterialRow extends StatelessWidget {
+  final ProductMaterial material;
+  final int index;
+  final ValueChanged<ProductMaterial> onChanged;
+  final VoidCallback onDelete;
+
+  const _MaterialRow({
+    required this.material,
+    required this.index,
+    required this.onChanged,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            // 颜色圆点
+            Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(material.argb),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+            ),
+            const SizedBox(width: 8),
+            // 挤出机编号
+            Text('E${index + 1}', style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(width: 12),
+            // 颜色名
+            SizedBox(
+              width: 100,
+              child: TextField(
+                controller: TextEditingController(text: material.colorName),
+                decoration: const InputDecoration(
+                  labelText: '颜色',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) => onChanged(material.copyWith(colorName: v)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            // 克重
+            SizedBox(
+              width: 80,
+              child: TextField(
+                controller: TextEditingController(text: material.grams.toStringAsFixed(1)),
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: '克重',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) {
+                  final g = double.tryParse(v);
+                  if (g != null) onChanged(material.copyWith(grams: g));
+                },
+              ),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, size: 18),
+              onPressed: onDelete,
+              color: Colors.red.shade400,
+              tooltip: '删除',
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

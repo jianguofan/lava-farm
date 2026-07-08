@@ -10,10 +10,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
-import '../../data/batch_operator.dart';
+import '../../application/providers/alert_provider.dart';
+import '../../data/alert_engine.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/farm_store.dart';
 import '../../data/printer_info.dart';
+import '../widgets/alert_pinned_banner.dart';
+import '../widgets/batch_control_drawer.dart';
 import '../widgets/batch_toolbar.dart';
 import '../widgets/broker_status_indicator.dart';
 import '../widgets/deployment_mode_banner.dart';
@@ -29,7 +32,12 @@ enum _PrinterFilter { all, printing, offline, mqtt, http }
 
 /// 农场仪表盘页面
 class FarmDashboardPage extends ConsumerStatefulWidget {
-  const FarmDashboardPage({super.key});
+  final bool enableAutoConnect;
+
+  const FarmDashboardPage({
+    super.key,
+    this.enableAutoConnect = true,
+  });
 
   @override
   ConsumerState<FarmDashboardPage> createState() => _FarmDashboardPageState();
@@ -37,14 +45,17 @@ class FarmDashboardPage extends ConsumerStatefulWidget {
 
 class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
   final _selectedSns = <String>{};
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   _PrinterFilter _activeFilter = _PrinterFilter.all;
   bool _autoConnectAttempted = false;
 
   @override
   void initState() {
     super.initState();
-    // 首帧后自动连接 Broker
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+    if (widget.enableAutoConnect) {
+      // 首帧后自动连接 Broker
+      WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
+    }
   }
 
   Future<void> _autoConnect() async {
@@ -98,6 +109,11 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
     ref.watch(farmMqttRouterProvider);
 
     return Scaffold(
+      key: _scaffoldKey,
+      endDrawer: BatchControlDrawer(
+        selectedPrinters: _selectedPrinters(),
+        onSubmit: _submitBatchControl,
+      ),
       appBar: AppBar(
         title: const Text('Lava Farm'),
         actions: [
@@ -105,6 +121,11 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
             onTap: () => _openBrokerSettings(context),
           ),
           const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.inventory_2_outlined),
+            tooltip: '产品信息',
+            onPressed: () => Navigator.pushNamed(context, '/products'),
+          ),
           IconButton(
             icon: const Icon(Icons.videocam),
             tooltip: '设备监控',
@@ -133,6 +154,12 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
       ),
       body: Column(
         children: [
+          // ── 告警监控（不可见，处理状态变化） ──
+          const _AlertMonitor(),
+
+          // ── 置顶异常横幅 ──
+          const AlertPinnedBanner(),
+
           // ── 状态横幅 ──
           _buildBanners(),
 
@@ -232,6 +259,34 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
     );
   }
 
+  List<FarmPrinterState> _selectedPrinters() {
+    final store = ref.read(farmStoreProvider);
+    return _selectedSns
+        .map(store.getPrinter)
+        .whereType<FarmPrinterState>()
+        .toList();
+  }
+
+  Future<List<BatchResult>> _submitBatchControl(
+    BatchControlOperation operation,
+    double? value,
+  ) async {
+    final sns = _selectedSns.toList();
+    final operator = ref.read(batchOperatorProvider);
+    switch (operation) {
+      case BatchControlOperation.pause:
+        return operator.batchPause(sns);
+      case BatchControlOperation.resume:
+        return operator.batchResume(sns);
+      case BatchControlOperation.stopAndClear:
+        return operator.batchCancel(sns);
+      case BatchControlOperation.setBedTemp:
+        return operator.batchSetBedTemp(printerSns: sns, temp: value ?? 0);
+      case BatchControlOperation.setNozzleTemp:
+        return operator.batchSetNozzleTemp(printerSns: sns, temp: value ?? 0);
+    }
+  }
+
   /// 处理批量操作
   Future<void> _handleBatchAction(
       BuildContext context, BatchAction action) async {
@@ -260,8 +315,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
         _showBatchResult(context, '急停', results);
         break;
       case BatchAction.setTemperatures:
-        _showTempDialog(context, sns);
-        return; // 不清除选择（对话框内处理）
+        _scaffoldKey.currentState?.openEndDrawer();
+        return; // 抽屉内处理并保留选择
       case BatchAction.sendGcode:
         _showGcodeDialog(context, sns);
         return; // 不清除选择（对话框内处理）
@@ -466,5 +521,62 @@ class _FilterChip extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// 告警监控器（不可见）
+///
+/// 监听 FarmStore 变化，将设备状态旧→新转发给 AlertEngine，
+/// 生成、合并和 resolve 告警。
+class _AlertMonitor extends ConsumerStatefulWidget {
+  const _AlertMonitor();
+
+  @override
+  ConsumerState<_AlertMonitor> createState() => _AlertMonitorState();
+}
+
+class _AlertMonitorState extends ConsumerState<_AlertMonitor> {
+  /// 上一轮设备状态快照：sn -> FarmPrinterState
+  final Map<String, FarmPrinterState> _prevStates = {};
+
+  @override
+  Widget build(BuildContext context) {
+    // 监听版本号感知变化
+    ref.listen(farmStoreVersionProvider, (prev, next) {
+      _processChanges();
+    });
+
+    // 定期过期静音
+    ref.listen(alertDeltaProvider, (prev, next) {
+      ref.read(alertActionsProvider.notifier).expireMuted();
+    });
+
+    return const SizedBox.shrink();
+  }
+
+  void _processChanges() {
+    final store = ref.read(farmStoreProvider);
+    final engine = ref.read(alertEngineProvider);
+    final printers = store.allPrinters;
+
+    for (final printer in printers) {
+      final prevState = _prevStates[printer.sn];
+
+      // 首次出现或状态时间变化 → 处理
+      if (prevState == null ||
+          printer.lastStatusTime.isAfter(prevState.lastStatusTime)) {
+        engine.processStateChange(prevState, printer);
+      }
+
+      // 保存当前状态引用用于下次比较
+      _prevStates[printer.sn] = printer;
+    }
+
+    // 清理不在列表中的设备
+    final activeSns = printers.map((p) => p.sn).toSet();
+    _prevStates.keys
+        .where((sn) => !activeSns.contains(sn))
+        .toList()
+        .forEach(_prevStates.remove);
   }
 }

@@ -12,6 +12,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../application/providers/alert_provider.dart';
 import '../../application/providers/broker_state_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/printer_info.dart';
@@ -51,7 +52,12 @@ class PrinterCard extends ConsumerWidget {
     }
 
     final statusColor = _statusColor(printer);
-    final borderColor = isSelected ? Colors.blue : statusColor.withOpacity(0.3);
+    final hasAlert = ref.watch(printerHasAlertProvider(sn));
+    final borderColor = isSelected
+        ? Colors.blue
+        : hasAlert
+            ? Colors.red.withOpacity(0.6)
+            : statusColor.withOpacity(0.3);
 
     return GestureDetector(
       onTap: onTap,

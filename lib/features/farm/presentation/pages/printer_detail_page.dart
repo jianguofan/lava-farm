@@ -799,17 +799,18 @@ class _MetricChip extends StatelessWidget {
 // 手动控制
 // ═══════════════════════════════════════════════════════════════
 
-class _ManualControlSection extends StatefulWidget {
+class _ManualControlSection extends ConsumerStatefulWidget {
   final String sn;
   const _ManualControlSection({required this.sn});
 
   @override
-  State<_ManualControlSection> createState() => _ManualControlSectionState();
+  ConsumerState<_ManualControlSection> createState() => _ManualControlSectionState();
 }
 
-class _ManualControlSectionState extends State<_ManualControlSection> {
+class _ManualControlSectionState extends ConsumerState<_ManualControlSection> {
   final _gcodeController = TextEditingController();
   final _tempController = TextEditingController(text: '210');
+  final _bedTempController = TextEditingController(text: '65');
   bool _isSending = false;
   bool _disposed = false;
 
@@ -818,6 +819,7 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
     _disposed = true;
     _gcodeController.dispose();
     _tempController.dispose();
+    _bedTempController.dispose();
     super.dispose();
   }
 
@@ -836,9 +838,7 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: _isSending ? null : () {
-                  // TODO: 调用 batchEmergencyStop
-                },
+                onPressed: _isSending ? null : _emergencyStop,
                 icon: const Icon(Icons.warning_amber, color: Colors.red),
                 label: const Text('紧急停止', style: TextStyle(color: Colors.red)),
                 style: OutlinedButton.styleFrom(
@@ -865,13 +865,30 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
-                  onPressed: _isSending ? null : () {},
+                  onPressed: _isSending ? null : () => _setNozzleTemp(),
                   icon: const Icon(Icons.whatshot, size: 18),
                   label: const Text('设置喷嘴'),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                SizedBox(
+                  width: 80,
+                  child: TextField(
+                    controller: _bedTempController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '热床 °C',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 8),
                 ElevatedButton.icon(
-                  onPressed: _isSending ? null : () {},
+                  onPressed: _isSending ? null : () => _setBedTemp(),
                   icon: const Icon(Icons.heat_pump, size: 18),
                   label: const Text('设置热床'),
                 ),
@@ -892,23 +909,18 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
             const SizedBox(height: 8),
             Row(
               children: [
-                _GcodeChip('G28', '归零'),
+                _GcodeChip('G28', '归零', onTap: (gcode) { _gcodeController.text = gcode; }),
                 const SizedBox(width: 6),
-                _GcodeChip('G90', '绝对定位'),
+                _GcodeChip('G90', '绝对定位', onTap: (gcode) { _gcodeController.text = gcode; }),
                 const SizedBox(width: 6),
-                _GcodeChip('G91', '相对定位'),
+                _GcodeChip('G91', '相对定位', onTap: (gcode) { _gcodeController.text = gcode; }),
                 const SizedBox(width: 6),
-                _GcodeChip('M106 S255', '风扇全速'),
+                _GcodeChip('M106 S255', '风扇全速', onTap: (gcode) { _gcodeController.text = gcode; }),
                 const Spacer(),
                 ElevatedButton.icon(
                   onPressed: _isSending || _gcodeController.text.isEmpty
                       ? null
-                      : () {
-                          setState(() => _isSending = true);
-                          Future.delayed(const Duration(seconds: 1), () {
-                            if (!_disposed && mounted) setState(() => _isSending = false);
-                          });
-                        },
+                      : _sendGcode,
                   icon: _isSending
                       ? const SizedBox(width: 14, height: 14,
                           child: CircularProgressIndicator(strokeWidth: 2))
@@ -922,18 +934,115 @@ class _ManualControlSectionState extends State<_ManualControlSection> {
       ),
     );
   }
+
+  Future<void> _emergencyStop() async {
+    setState(() => _isSending = true);
+    try {
+      final router = ref.read(farmMqttRouterProvider);
+      await router?.sendCommand(widget.sn, 'printer.emergency_stop');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('急停指令已发送')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('急停失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _setNozzleTemp() async {
+    final temp = double.tryParse(_tempController.text);
+    if (temp == null) return;
+    setState(() => _isSending = true);
+    try {
+      final router = ref.read(farmMqttRouterProvider);
+      await router?.sendCommand(widget.sn, 'printer.gcode.script',
+        {'script': 'M104 S${temp.toInt()}'},
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('喷嘴温度已设为 ${temp.toInt()}°C')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('设置温度失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _setBedTemp() async {
+    final temp = double.tryParse(_bedTempController.text);
+    if (temp == null) return;
+    setState(() => _isSending = true);
+    try {
+      final router = ref.read(farmMqttRouterProvider);
+      await router?.sendCommand(widget.sn, 'printer.gcode.script',
+        {'script': 'M140 S${temp.toInt()}'},
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('热床温度已设为 ${temp.toInt()}°C')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('设置温度失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendGcode() async {
+    final gcode = _gcodeController.text.trim();
+    if (gcode.isEmpty) return;
+    setState(() => _isSending = true);
+    try {
+      final router = ref.read(farmMqttRouterProvider);
+      await router?.sendCommand(widget.sn, 'printer.gcode.script',
+        {'script': gcode},
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('GCode 已发送: $gcode')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('发送失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
 }
 
 class _GcodeChip extends StatelessWidget {
   final String gcode;
   final String label;
-  const _GcodeChip(this.gcode, this.label);
+  final void Function(String gcode)? onTap;
+  const _GcodeChip(this.gcode, this.label, {this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return ActionChip(
       label: Text(label, style: const TextStyle(fontSize: 11)),
-      onPressed: () {},
+      onPressed: () => onTap?.call(gcode),
       visualDensity: VisualDensity.compact,
     );
   }

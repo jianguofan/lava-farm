@@ -15,6 +15,7 @@ import 'features/farm/presentation/pages/discovery_wizard_page.dart';
 import 'features/farm/presentation/pages/settings_page.dart';
 import 'features/farm/presentation/pages/batch_print_page.dart';
 import 'features/farm/presentation/pages/log_viewer_page.dart';
+import 'features/farm/presentation/pages/product_center_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -75,9 +76,14 @@ class LavaFarmApp extends StatelessWidget {
           builder: (_) => const SettingsPage(),
         );
       case '/batch-print':
-        final initialSns = (settings.arguments as List<String>?) ?? <String>[];
+        final args = settings.arguments;
+        final initialSns = args is List<String> ? args : <String>[];
         return MaterialPageRoute(
           builder: (_) => BatchPrintPage(initialSns: initialSns.toSet()),
+        );
+      case '/products':
+        return MaterialPageRoute(
+          builder: (_) => const ProductCenterPage(),
         );
       case '/logs':
         return MaterialPageRoute(

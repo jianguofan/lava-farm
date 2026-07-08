@@ -1,19 +1,22 @@
 # Tasks: lava-farm 实现计划
 
-## Phase 1: 项目骨架 + Broker 连接管理 (Day 1-2)
+> **整体状态**: Phase 1-8, 10-11 已完成核心实现，Phase 9 部分完成，Phase 12 待执行。
+> 文件位于 `lib/features/farm/` 下，按 data/application/presentation/domain 分层。
 
-### T1.1 创建 Flutter 项目
+## Phase 1: 项目骨架 + Broker 连接管理 (Day 1-2) ✅ 已完成
+
+### T1.1 创建 Flutter 项目 ✅
 - `flutter create lava_farm` 在 `/Users/jgfan/code/lava-farm/`
 - 配置 `pubspec.yaml`：添加 `lava_device_sdk` 依赖、Riverpod、Hive、flutter_secure_storage
 - 设置 OpenSpec CI 集成
 - 验证: `flutter run -d macos` 显示空白窗口
 
-### T1.2 CredentialStore 实现
+### T1.2 CredentialStore 实现 ✅
 - `CredentialStore.generatePrinterPassword(sn)` — 安全随机密码生成
 - `CredentialStore.saveBrokerCredentials()` / `loadBrokerCredentials()` — flutter_secure_storage 持久化
 - 验证: 单元测试（密码生成/存储/读取/清除）
 
-### T1.3 BrokerConnectionManager 实现
+### T1.3 BrokerConnectionManager 实现 ✅
 - `BrokerConnectionManager.connect(host, port, username, password)` — 连接外部 Broker
 - MQTT 客户端连接 (`MqttTransport.connect`)
 - 自动重连（指数退避: 2s → 4s → 8s → ... → 30s max）
@@ -21,7 +24,7 @@
 - `stateStream` — `BrokerConnState` 流
 - 验证: 单元测试中连接/断开外部 mosquitto，确认状态流正确
 
-### T1.4 Broker 状态 Provider
+### T1.4 Broker 状态 Provider ✅
 - `brokerConnMgrProvider` (Provider)
 - `brokerStateProvider` (StreamProvider → BrokerConnState)
 - `BrokerStatusIndicator` widget (UI 指示器)
@@ -29,7 +32,7 @@
 
 ---
 
-## Phase 2: 打印机发现 (Day 2-3)
+## Phase 2: 打印机发现 (Day 2-3) ✅ 已完成
 
 ### T2.1 mDNS 发现
 - `PrinterDiscovery.discoverMdns()` — 扫描 `_moonraker._tcp.local`
@@ -54,7 +57,7 @@
 
 ---
 
-## Phase 3: 配置推送 + 入网 (Day 3-5)
+## Phase 3: 配置推送 + 入网 (Day 3-5) ✅ 已完成
 
 ### T3.1 ConfigPushService
 - `POST /server/config` 写入 `[mqtt]` 配置段（含 `username` + `password`）
@@ -85,7 +88,7 @@
 
 ---
 
-## Phase 4: FarmStore + 状态聚合 (Day 5-7)
+## Phase 4: FarmStore + 状态聚合 (Day 5-7) ✅ 已完成
 
 ### T4.1 FarmPrinterState 模型
 - 实现 `FarmPrinterState` 数据类
@@ -122,7 +125,7 @@
 
 ---
 
-## Phase 5: MQTT 消息处理 (Day 7-9)
+## Phase 5: MQTT 消息处理 (Day 7-9) ✅ 已完成
 
 ### T5.1 FarmMqttRouter
 - 连接到外部 Broker（凭据认证）
@@ -149,7 +152,7 @@
 
 ---
 
-## Phase 6: 批量操作引擎 (Day 9-11)
+## Phase 6: 批量操作引擎 (Day 9-11) ✅ 已完成
 
 ### T6.1 BatchOperator 核心
 - `_fanOut()` 通用 Fan-Out 方法
@@ -175,7 +178,7 @@
 
 ---
 
-## Phase 7: HTTP 降级通道 (Day 11-12)
+## Phase 7: HTTP 降级通道 (Day 11-12) ✅ 已完成
 
 ### T7.1 HttpPoller 实现
 - 请求队列 `RequestQueue(maxConcurrency: 20)`
@@ -205,7 +208,7 @@
 
 ---
 
-## Phase 8: 连接监控与故障恢复 (Day 12-13)
+## Phase 8: 连接监控与故障恢复 (Day 12-13) ✅ 已完成
 
 ### T8.1 FarmConnectionMonitor
 - 每 30s 检查所有在线打印机的 `lastStatusTime`
@@ -225,7 +228,7 @@
 
 ---
 
-## Phase 9: 安全 + 部署 (Day 13-14)
+## Phase 9: 安全 + 部署 (Day 13-14) ⚠️ 部分完成
 
 ### T9.1 Broker 配置生成器
 - App 内生成 `mosquitto.conf`（生产模式）
@@ -259,7 +262,7 @@
 
 ---
 
-## Phase 10: 文件分发 (Day 14-15)
+## Phase 10: 文件分发 (Day 14-15) ✅ 已完成
 
 ### T10.1 FileUploader 实现
 - HTTP multipart 上传 (`/server/files/upload`)
@@ -276,7 +279,7 @@
 
 ---
 
-## Phase 11: UI 主界面 (Day 15-17)
+## Phase 11: UI 主界面 (Day 15-17) ✅ 已完成
 
 ### T11.1 打印机卡片
 - `PrinterCard` — 单打印机状态卡片
@@ -316,7 +319,7 @@
 
 ---
 
-## Phase 12: 测试与调优 (Day 17-18)
+## Phase 12: 测试与调优 (Day 17-18) ⬜ 待执行
 
 ### T12.1 压力测试
 - 模拟 100 台打印机 MQTT 连接

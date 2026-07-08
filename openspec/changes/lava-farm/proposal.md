@@ -4,6 +4,15 @@
 
 基于独立 MQTT Broker + Moonraker 协议，为 Snapmaker 打印机构建 Flutter 桌面端群控应用（lava-farm）。支持最多 100 台打印机在同一局域网内的实时监控、批量控制、文件分发。采用 MQTT 优先 + HTTP 降级的双模通信架构。Broker 独立部署（7×24 运行），桌面 App 作为纯 MQTT 客户端（可随时开关）。同时提供内嵌 Broker 模式用于快速评估。
 
+本 change 作为底层通信与群控底座。产品级能力按版本计划拆分到以下 OpenSpec change：
+
+- `product-definition`：产品/模型定义与产品中心。
+- `control-panel`：全屏控制面板与批量控制抽屉。
+- `preprint-workflow`：预打印四步流程与投产结果。
+- `alert-pinning`：异常置顶提示。
+- `printer-detail-control`：单设备详情与控制。
+- `desktop-shell`：桌面壳层、Broker 配置、安装部署。
+
 ## Motivation
 
 现有 `lava_device_sdk` + `flutter_zero_copy` 架构面向**单设备连接**设计：`DeviceSessionImpl` 同时只管理一个活跃设备，MQTT 连接是一对一的。对于拥有数十台打印机的农场场景，需要：
