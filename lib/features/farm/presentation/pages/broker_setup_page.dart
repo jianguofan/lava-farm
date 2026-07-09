@@ -11,8 +11,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../data/broker_connection_manager.dart';
-import '../../data/farm_store.dart';
-import '../../data/printer_info.dart';
 
 /// Broker 设置页面
 class BrokerSetupPage extends ConsumerStatefulWidget {
@@ -257,9 +255,6 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
 
       // MQTT 已连接 → Router 由 farmMqttRouterProvider 自动创建并 start()
       // （farmMqttRouterProvider 监听了 brokerStateProvider，状态变为 connected 后自动创建 Router）
-      // 注册预设设备（演示用）
-      final store = ref.read(farmStoreProvider);
-      _registerDemoDevices(store);
     } catch (e) {
       setState(() => _errorMessage = '连接失败: $e');
     } finally {
@@ -276,36 +271,4 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
     }
   }
 
-  void _registerDemoDevices(FarmStore store) {
-    // const demoDevices = [
-    //   ('8110026042710299B378', '切片工程-01', 'slicing'),
-    //   ('81100260503102537008', '切片工程-02', 'slicing'),
-    //   ('8110026050310266IC73', '切片工程-03', 'slicing'),
-    //   ('81100260503003514ZB5', '切片工程-04', 'slicing'),
-    //   ('8110026050310190EKV9', 'web全栈-01', 'web'),
-    //   ('8110026050310268AUFG', 'web全栈-02', 'web'),
-    //   ('8110025060100049IXMZ', '服务端运维-01', 'backend'),
-    //   ('8110025070800048LD98', '服务端运维-02', 'backend'),
-    //   ('8110025070800069BU7J', '客户端-01', 'client'),
-    //   ('811002605310262H7H8', '客户端-02', 'client'),
-    //   ('8110026050300191X4HB', '测试-01', 'test'),
-    // ];
-    const demoDevices = [
-      ('8110025070800069BU7J', '客户端-01', 'client'),
-      ('8110026050310262H7H8', '客户端-02', 'client'),
-    ];
-    for (final (sn, name, group) in demoDevices) {
-      if (store.getPrinter(sn) == null) {
-        store.onPrinterRegistered(PrinterInfo(
-          sn: sn,
-          displayName: name,
-          ip: '—',
-          port: 7125,
-          group: group,
-          source: Source.mqtt,
-          model: 'Snapmaker J1',
-        ));
-      }
-    }
-  }
 }

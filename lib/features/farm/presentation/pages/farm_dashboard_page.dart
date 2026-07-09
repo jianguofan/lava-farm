@@ -7,14 +7,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../application/providers/alert_provider.dart';
-import '../../data/alert_engine.dart';
 import '../../data/farm_printer_state.dart';
-import '../../data/farm_store.dart';
-import '../../data/printer_info.dart';
 import '../widgets/alert_pinned_banner.dart';
 import '../widgets/batch_control_drawer.dart';
 import '../widgets/batch_toolbar.dart';
@@ -72,34 +68,8 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
         username: 'lava_app',
         password: 'lava-farm-admin',
       );
-
-      // 注册预设设备（触发 _probeAll 轮询获取 IP）
-      final store = ref.read(farmStoreProvider);
-      _registerDemoDevices(store);
     } catch (_) {
       // 自动连接失败 — 用户可手动进入 Broker 设置页配置
-    }
-  }
-
-  void _registerDemoDevices(FarmStore store) {
-    const demoDevices = [
-      ('8110026050310262H7H8', '客户端-02', 'client'),
-      ('8110025070800069BU7J', '客户端-01', 'client'),
-      ('8110026061510231Z7AM', '客户端-03', 'client'),
-    ];
-
-    for (final (sn, name, group) in demoDevices) {
-      if (store.getPrinter(sn) == null) {
-        store.onPrinterRegistered(PrinterInfo(
-          sn: sn,
-          displayName: name,
-          ip: '—',
-          port: 7125,
-          group: group,
-          source: Source.mqtt,
-          model: 'Snapmaker J1',
-        ));
-      }
     }
   }
 
