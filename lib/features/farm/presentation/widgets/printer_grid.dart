@@ -26,6 +26,7 @@ class PrinterGrid extends ConsumerStatefulWidget {
   final ValueChanged<Set<String>> onSelectionChanged;
   final void Function(String sn)? onPrinterTap;
   final void Function(String sn)? onPrinterLongPress;
+  final void Function(String sn)? onDeletePrinter;
 
   const PrinterGrid({
     super.key,
@@ -33,6 +34,7 @@ class PrinterGrid extends ConsumerStatefulWidget {
     required this.onSelectionChanged,
     this.onPrinterTap,
     this.onPrinterLongPress,
+    this.onDeletePrinter,
   });
 
   @override
@@ -93,7 +95,7 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
                 itemCount: printers.length,
                 itemBuilder: (context, index) {
                   final printer = printers[index];
-                  return PrinterCard(
+                  final card = PrinterCard(
                     sn: printer.sn,
                     isSelected: widget.selectedSns.contains(printer.sn),
                     onTap: () {
@@ -105,12 +107,37 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
                       }
                     },
                     onLongPress: () {
-                      // 长按进入多选模式
-                      if (widget.selectedSns.isEmpty) {
+                      if (widget.selectedSns.isNotEmpty) {
+                        // 多选模式下长按 = 切换选中
                         _toggleSelection(printer.sn);
+                      } else {
+                        // 非多选模式下长按 = 弹出删除确认
+                        _showDeleteDialog(context, printer.sn, printer.displayName ?? printer.sn);
                       }
                       widget.onPrinterLongPress?.call(printer.sn);
                     },
+                  );
+
+                  // 仅在非多选模式下支持滑动删除
+                  if (widget.selectedSns.isNotEmpty) {
+                    return card;
+                  }
+
+                  return Dismissible(
+                    key: Key('dismiss_${printer.sn}'),
+                    direction: DismissDirection.endToStart,
+                    confirmDismiss: (_) => _confirmDismiss(context, printer.sn, printer.displayName ?? printer.sn),
+                    background: Container(
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 20),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade400,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(Icons.delete_outline, color: Colors.white, size: 28),
+                    ),
+                    child: card,
                   );
                 },
               ),
@@ -119,6 +146,58 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
         );
       },
     );
+  }
+
+  /// 长按删除确认对话框
+  void _showDeleteDialog(BuildContext context, String sn, String name) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除打印机'),
+        content: Text('确定要移除打印机 "$name" 吗？\n\n打印机本身不会受到影响，你可以之后重新添加。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              widget.onDeletePrinter?.call(sn);
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 滑动删除确认（Dismissible confirmDismiss）
+  Future<bool> _confirmDismiss(BuildContext context, String sn, String name) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除打印机'),
+        content: Text('确定要移除打印机 "$name" 吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      widget.onDeletePrinter?.call(sn);
+      return true;
+    }
+    return false;
   }
 
   void _toggleSelection(String sn) {

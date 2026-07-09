@@ -182,6 +182,11 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
               onPrinterLongPress: (sn) {
                 // 长按进入多选，已在 PrinterGrid 内部处理
               },
+              onDeletePrinter: (sn) {
+                ref.read(farmHubProvider).removePrinter(sn);
+                _selectedSns.remove(sn);
+                _showSnackBar(context, '已移除打印机 $sn');
+              },
             ),
           ),
 
