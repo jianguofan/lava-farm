@@ -27,6 +27,6 @@
 
 ## 5. 验证
 
-- [ ] `flutter analyze`
-- [ ] `flutter test`
+- [x] `flutter analyze`（无新增 error/warning，仅遗留 info 级提示）
+- [x] `flutter test`（87 项全部通过）
 - [ ] 手工导入一个 G-code/3MF，确认卡片字段、缩略图、投产入口可用。

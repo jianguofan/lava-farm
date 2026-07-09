@@ -18,6 +18,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/bed_inspection_provider.dart';
+import '../../application/providers/product_provider.dart';
 import '../../data/farm_printer_state.dart';
 import '../../data/camera_service.dart';
 import '../../data/printer_discovery.dart';
@@ -127,6 +128,12 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
             // ── 区块 4: 打印进度 ──
             if (printer.hasPrintJob) ...[
               _PrintProgressSection(printer: printer),
+              const SizedBox(height: 16),
+            ],
+
+            // ── 区块 4.5: 耗材余量 ──
+            if (printer.isOnline) ...[
+              _FilamentSection(printer: printer),
               const SizedBox(height: 16),
             ],
 
@@ -471,6 +478,10 @@ class _TemperatureSection extends StatelessWidget {
                 isStale: printer.bedTemp?.isStale ?? false,
                 color: Colors.orange,
               ),
+
+            // 30 分钟温度曲线
+            const SizedBox(height: 16),
+            _TemperatureChart(printer: printer),
           ],
         ),
       ),
@@ -480,6 +491,231 @@ class _TemperatureSection extends StatelessWidget {
   Color _extruderColor(int index) {
     const colors = [Colors.red, Colors.blue, Colors.green, Colors.purple, Colors.teal];
     return colors[(index - 1) % colors.length];
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 30 分钟温度曲线
+// ═══════════════════════════════════════════════════════════════
+
+class _TemperatureChart extends StatelessWidget {
+  final FarmPrinterState printer;
+  const _TemperatureChart({required this.printer});
+
+  @override
+  Widget build(BuildContext context) {
+    final samples = printer.tempHistory;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('30 分钟温度曲线',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            _LegendDot(color: Colors.red, label: '喷嘴'),
+            const SizedBox(width: 12),
+            if (printer.bedTemp != null) _LegendDot(color: Colors.orange, label: '热床'),
+            const SizedBox(width: 8),
+            Text('${samples.length} 采样',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 140,
+          width: double.infinity,
+          child: samples.length < 2
+              ? Center(
+                  child: Text(
+                    samples.isEmpty
+                        ? '正在采集温度数据…'
+                        : '数据不足，稍后显示曲线',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+                  ),
+                )
+              : CustomPaint(
+                  size: Size.infinite,
+                  painter: _TemperatureChartPainter(samples: samples),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+      ],
+    );
+  }
+}
+
+class _TemperatureChartPainter extends CustomPainter {
+  final List<TemperatureSample> samples;
+  _TemperatureChartPainter({required this.samples});
+
+  static const double _padLeft = 32;
+  static const double _padRight = 8;
+  static const double _padTop = 8;
+  static const double _padBottom = 16;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final plotRect = Rect.fromLTRB(
+      _padLeft,
+      _padTop,
+      size.width - _padRight,
+      size.height - _padBottom,
+    );
+
+    // Y 范围：数据 min/max 加 padding，至少 0–50
+    double minTemp = double.infinity;
+    double maxTemp = double.negativeInfinity;
+    for (final s in samples) {
+      final candidates = [
+        s.nozzleTemp,
+        s.nozzleTarget ?? s.nozzleTemp,
+        s.bedTemp,
+        s.bedTarget ?? s.bedTemp,
+      ];
+      for (final v in candidates) {
+        if (v < minTemp) minTemp = v;
+        if (v > maxTemp) maxTemp = v;
+      }
+    }
+    if (minTemp == double.infinity) {
+      minTemp = 0;
+      maxTemp = 50;
+    }
+    final span = (maxTemp - minTemp).clamp(10.0, double.infinity);
+    minTemp = (minTemp - span * 0.1).clamp(0.0, double.infinity);
+    maxTemp = maxTemp + span * 0.1;
+    final yRange = maxTemp - minTemp;
+
+    // X 范围：时间（首末采样点）
+    final tStart = samples.first.timestamp.millisecondsSinceEpoch.toDouble();
+    final tEnd = samples.last.timestamp.millisecondsSinceEpoch.toDouble();
+    final tSpan = (tEnd - tStart).clamp(1.0, double.infinity);
+
+    double xOf(DateTime t) {
+      final ms = t.millisecondsSinceEpoch.toDouble();
+      return plotRect.left + (ms - tStart) / tSpan * plotRect.width;
+    }
+
+    double yOf(double temp) {
+      return plotRect.bottom - (temp - minTemp) / yRange * plotRect.height;
+    }
+
+    // 网格 + Y 刻度
+    final gridPaint = Paint()
+      ..color = Colors.grey.shade200
+      ..strokeWidth = 1;
+    final labelStyle = TextStyle(fontSize: 9, color: Colors.grey.shade500);
+    const gridLines = 4;
+    for (var i = 0; i <= gridLines; i++) {
+      final y = plotRect.top + plotRect.height * i / gridLines;
+      canvas.drawLine(Offset(plotRect.left, y), Offset(plotRect.right, y), gridPaint);
+      final tempVal = maxTemp - yRange * i / gridLines;
+      final tp = TextPainter(
+        text: TextSpan(text: '${tempVal.round()}', style: labelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(plotRect.left - tp.width - 3, y - tp.height / 2));
+    }
+
+    // 时间轴标签（首/末）
+    final startLabel = _clock(samples.first.timestamp);
+    final endLabel = _clock(samples.last.timestamp);
+    for (final entry in [
+      (plotRect.left, startLabel),
+      (plotRect.right, endLabel),
+    ]) {
+      final tp = TextPainter(
+        text: TextSpan(text: entry.$2, style: labelStyle),
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+      )..layout();
+      final cx = (entry.$1 == plotRect.right)
+          ? entry.$1 - tp.width
+          : entry.$1;
+      tp.paint(canvas, Offset(cx, plotRect.bottom + 3));
+    }
+
+    // 喷嘴曲线
+    _drawLine(canvas, samples, plotRect, xOf, yOf, (s) => s.nozzleTemp, Colors.red);
+    // 热床曲线（仅当存在热床数据）
+    final hasBed = samples.any((s) => s.bedTemp > 0);
+    if (hasBed) {
+      _drawLine(canvas, samples, plotRect, xOf, yOf, (s) => s.bedTemp, Colors.orange);
+    }
+  }
+
+  void _drawLine(
+    Canvas canvas,
+    List<TemperatureSample> samples,
+    Rect plotRect,
+    double Function(DateTime) xOf,
+    double Function(double) yOf,
+    double Function(TemperatureSample) valueOf,
+    Color color,
+  ) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.8
+      ..style = PaintingStyle.stroke
+      ..isAntiAlias = true;
+
+    final path = Path();
+    var started = false;
+    for (final s in samples) {
+      final x = xOf(s.timestamp).clamp(plotRect.left, plotRect.right);
+      final y = yOf(valueOf(s)).clamp(plotRect.top, plotRect.bottom);
+      if (!started) {
+        path.moveTo(x, y);
+        started = true;
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    canvas.drawPath(path, paint);
+
+    // 末端圆点（当前值）
+    if (samples.isNotEmpty) {
+      final last = samples.last;
+      final x = xOf(last.timestamp).clamp(plotRect.left, plotRect.right);
+      final y = yOf(valueOf(last)).clamp(plotRect.top, plotRect.bottom);
+      canvas.drawCircle(Offset(x, y), 2.5, Paint()..color = color);
+    }
+  }
+
+  String _clock(DateTime dt) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(dt.hour)}:${two(dt.minute)}';
+  }
+
+  @override
+  bool shouldRepaint(covariant _TemperatureChartPainter old) {
+    return old.samples.length != samples.length ||
+        (samples.isNotEmpty &&
+            old.samples.isNotEmpty &&
+            samples.last.timestamp != old.samples.last.timestamp);
   }
 }
 
@@ -792,6 +1028,160 @@ class _MetricChip extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 耗材余量
+// ═══════════════════════════════════════════════════════════════
+
+/// 1.75mm 耗材 mm → g 转换系数（PLA 密度 1.24 g/cm³）
+/// 截面积 π × 0.875² ≈ 2.405 mm²；× 0.00124 g/mm³ ≈ 0.00298 g/mm
+const double _filamentGramsPerMm = 0.00298;
+
+class _FilamentSection extends ConsumerWidget {
+  final FarmPrinterState printer;
+  const _FilamentSection({required this.printer});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final usedMm = printer.filamentUsed ?? 0;
+    final consumedGrams = usedMm * _filamentGramsPerMm;
+    final consumedMeters = usedMm / 1000.0;
+
+    // 按当前文件名匹配产品，估算总量与余量
+    final file = printer.currentFile?.value;
+    final fileNoExt = file == null ? null : _stripExt(file);
+    final products = ref.watch(productListProvider);
+    final match = file == null
+        ? null
+        : products.where((p) {
+              final base = p.sourceFilePath.split('/').last;
+              return base == file ||
+                  p.name == file ||
+                  p.name == fileNoExt ||
+                  _stripExt(base) == fileNoExt;
+            }).firstOrNull;
+
+    final totalGrams = match?.totalFilamentGrams ?? 0;
+    final hasTotal = match != null && totalGrams > 0;
+    final remainingGrams =
+        hasTotal ? (totalGrams - consumedGrams).clamp(0.0, totalGrams) : null;
+    final progress =
+        hasTotal ? (consumedGrams / totalGrams).clamp(0.0, 1.0) : null;
+    final isLow = hasTotal && remainingGrams! < totalGrams * 0.1;
+
+    return Card(
+      shape: isLow
+          ? RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+              side: BorderSide(color: Colors.red.shade300, width: 1.5),
+            )
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.invert_colors, size: 18, color: Color(0xFF0C63E2)),
+                const SizedBox(width: 8),
+                const Text('耗材余量',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                if (isLow)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.warning_amber_rounded, size: 14, color: Colors.red.shade700),
+                        const SizedBox(width: 4),
+                        Text('耗材不足',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.red.shade700)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+            const Divider(),
+            Row(
+              children: [
+                _MetricChip(
+                  icon: Icons.straighten,
+                  label: '已消耗',
+                  value: '${consumedMeters.toStringAsFixed(2)} m',
+                ),
+                const SizedBox(width: 12),
+                _MetricChip(
+                  icon: Icons.scale,
+                  label: '已消耗',
+                  value: '${consumedGrams.toStringAsFixed(1)} g',
+                ),
+                const SizedBox(width: 12),
+                _MetricChip(
+                  icon: Icons.inventory_2_outlined,
+                  label: hasTotal ? '剩余' : '总量',
+                  value: hasTotal
+                      ? '${remainingGrams!.toStringAsFixed(0)} g'
+                      : (match != null ? '${totalGrams.toStringAsFixed(0)} g' : '—'),
+                ),
+              ],
+            ),
+            if (hasTotal) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text('${(progress! * 100).toStringAsFixed(0)}%',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 4),
+                  Text('/ ${totalGrams.toStringAsFixed(0)} g',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                ],
+              ),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 8,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: AlwaysStoppedAnimation(
+                    isLow ? Colors.red : const Color(0xFF0C63E2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '依据产品「${match.displayName}」估算，实际以耗材为准',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              ),
+            ] else ...[
+              const SizedBox(height: 8),
+              Text(
+                file == null
+                    ? '当前无打印任务'
+                    : '未匹配到产品「$file」，无法估算余量（消耗值为本次累计）',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String? _stripExt(String name) {
+    final dot = name.lastIndexOf('.');
+    return dot > 0 ? name.substring(0, dot) : name;
   }
 }
 

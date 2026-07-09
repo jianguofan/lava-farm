@@ -17,11 +17,13 @@ import '../../application/providers/bed_inspection_provider.dart';
 import '../../application/providers/broker_state_provider.dart';
 import '../../application/providers/printer_list_provider.dart';
 import '../../application/providers/product_provider.dart';
+import '../../application/providers/production_history_provider.dart';
 import '../../application/services/batch_print_coordinator.dart';
 import '../../data/farm_printer_state.dart';
 import '../../domain/models/bed_inspection_result.dart';
 import '../../domain/models/product_definition.dart';
 import '../../domain/models/product_material.dart';
+import '../../domain/models/production_record.dart';
 
 /// 群控打印页面
 class BatchPrintPage extends ConsumerStatefulWidget {
@@ -59,6 +61,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
   final Map<String, BatchPrintPrinterState> _printerStates = {};
   BatchPrintProgress? _progress;
   final List<BatchPrintPrinterUpdate> _updateLog = [];
+  DateTime? _execStartTime;
+  ProductionRecord? _lastRecord;
 
   // ── 检测状态 ──
   bool _isInspecting = false;
@@ -127,6 +131,11 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       appBar: AppBar(
         title: const Text('群控打印'),
         actions: [
+          TextButton.icon(
+            icon: const Icon(Icons.history),
+            label: const Text('投产历史'),
+            onPressed: _showHistory,
+          ),
           if (_isDone)
             TextButton.icon(
               icon: const Icon(Icons.refresh),
@@ -458,6 +467,10 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
         // 操作按钮
         _buildActionButton(gateway != null, readyPrinters),
 
+        // 结果汇总面板（完成时）
+        if (_isDone && _lastRecord != null)
+          _buildResultPanel(_lastRecord!),
+
         // 进度显示
         if (_isExecuting || _isDone) Expanded(child: _buildProgressSection()),
 
@@ -485,6 +498,89 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
           ),
       ],
     );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 结果面板
+  // ═══════════════════════════════════════════════════════════
+
+  Widget _buildResultPanel(ProductionRecord record) {
+    final allOk = record.isSuccess;
+    return Card(
+      color: allOk ? Colors.green.shade50 : Colors.orange.shade50,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: allOk ? Colors.green.shade300 : Colors.orange.shade300,
+          width: 1.5,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  allOk ? Icons.check_circle : Icons.warning_amber_rounded,
+                  color: allOk ? Colors.green.shade700 : Colors.orange.shade700,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  allOk ? '投产完成' : '投产完成（部分失败）',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: allOk ? Colors.green.shade800 : Colors.orange.shade800,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 16,
+              runSpacing: 8,
+              children: [
+                _ResultStat(label: '产品', value: record.productName.isEmpty ? record.fileName : record.productName),
+                _ResultStat(label: '文件', value: record.fileName),
+                _ResultStat(label: '成功', value: '${record.successCount} 台'),
+                _ResultStat(label: '失败', value: '${record.failedCount} 台'),
+                _ResultStat(label: '耗时', value: '${record.duration.inSeconds}s'),
+                _ResultStat(label: '开始', value: _formatClock(record.startedAt)),
+              ],
+            ),
+            if (record.failures.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Text('失败明细', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 4),
+              ...record.failures.entries.map((e) => Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(e.key,
+                        style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: Colors.red)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(e.value,
+                          style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
+              )),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatClock(DateTime dt) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1400,6 +1496,8 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       _printerStates.clear();
       _progress = null;
       _updateLog.clear();
+      _execStartTime = DateTime.now();
+      _lastRecord = null;
     });
 
     _coordinator = BatchPrintCoordinator();
@@ -1432,6 +1530,64 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       gateway: gateway,
       printPlate: _printPlate,
     );
+
+    // 持久化投产记录
+    await _persistRecord(validSns);
+  }
+
+  /// 从本次执行结果构建并持久化投产记录
+  Future<void> _persistRecord(List<String> sns) async {
+    if (_execStartTime == null) return;
+
+    int success = 0;
+    int failed = 0;
+    final failures = <String, String>{};
+    for (final sn in sns) {
+      final state = _printerStates[sn];
+      if (state == BatchPrintPrinterState.success) {
+        success++;
+      } else if (state == BatchPrintPrinterState.uploadFailed ||
+          state == BatchPrintPrinterState.printFailed) {
+        failed++;
+        // 从更新日志找该 SN 最近一条错误
+        for (final update in _updateLog.reversed) {
+          if (update.sn == sn && update.error != null) {
+            failures[sn] = update.error!;
+            break;
+          }
+        }
+      }
+    }
+
+    final record = ProductionRecord(
+      id: _lastRecord?.id ?? '${DateTime.now().microsecondsSinceEpoch}',
+      productId: _selectedProduct?.id ?? '',
+      productName: _selectedProduct?.displayName ?? _fileName ?? '',
+      fileName: _fileName ?? '',
+      printerSns: List.unmodifiable(sns),
+      successCount: success,
+      failedCount: failed,
+      failures: failures,
+      printPlate: _printPlate,
+      startedAt: _execStartTime!,
+      finishedAt: DateTime.now(),
+    );
+
+    await ref.read(productionHistoryProvider.notifier).add(record);
+    if (!_disposed && mounted) {
+      setState(() => _lastRecord = record);
+    }
+  }
+
+  /// 投产历史弹窗
+  Future<void> _showHistory() async {
+    final history = ref.read(productionHistoryProvider).value ?? const [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _ProductionHistoryDialog(history: history),
+    );
+    // 关闭后刷新（历史可能被清空）
+    ref.read(productionHistoryProvider.notifier).load();
   }
 
   Future<void> _retryFailed() async {
@@ -1457,6 +1613,11 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
       gateway: gateway,
       printPlate: _printPlate,
     );
+
+    // 重试后用最新结果更新投产记录（复用同一 id）
+    if (!_disposed && mounted) {
+      await _persistRecord(_printerStates.keys.toList());
+    }
   }
 
   bool get _hasFailures {
@@ -1784,6 +1945,129 @@ class _MaterialRow extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 结果面板统计项
+class _ResultStat extends StatelessWidget {
+  final String label;
+  final String value;
+  const _ResultStat({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+        const SizedBox(height: 2),
+        Text(value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+      ],
+    );
+  }
+}
+
+/// 投产历史弹窗
+class _ProductionHistoryDialog extends ConsumerWidget {
+  final List<ProductionRecord> history;
+  const _ProductionHistoryDialog({required this.history});
+
+  String _dateLabel(DateTime dt) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${dt.month}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}';
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.history, size: 22),
+          const SizedBox(width: 8),
+          const Text('投产历史'),
+          const Spacer(),
+          if (history.isNotEmpty)
+            TextButton.icon(
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+              label: const Text('清空', style: TextStyle(fontSize: 12)),
+              onPressed: () async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('清空投产历史？'),
+                    content: const Text('此操作不可恢复。'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(ctx, false),
+                          child: const Text('取消')),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                        child: const Text('清空'),
+                      ),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  await ref.read(productionHistoryProvider.notifier).clear();
+                  if (context.mounted) Navigator.pop(context);
+                }
+              },
+            ),
+        ],
+      ),
+      content: SizedBox(
+        width: 520,
+        child: history.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.all(32),
+                child: Center(
+                  child: Text('暂无投产记录', style: TextStyle(color: Colors.grey)),
+                ),
+              )
+            : ListView.separated(
+                shrinkWrap: true,
+                itemCount: history.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, i) {
+                  final r = history[i];
+                  final allOk = r.isSuccess;
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      allOk ? Icons.check_circle : Icons.warning_amber_rounded,
+                      color: allOk ? Colors.green : Colors.orange,
+                      size: 22,
+                    ),
+                    title: Text(
+                      r.productName.isEmpty ? r.fileName : r.productName,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      '${_dateLabel(r.startedAt)} · 成功${r.successCount}/失败${r.failedCount} · ${r.duration.inSeconds}s · ${r.printerSns.length}台',
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: Text(
+                      'Plate ${r.printPlate}',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                    ),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
     );
   }
 }

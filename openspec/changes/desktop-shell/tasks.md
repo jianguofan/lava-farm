@@ -6,4 +6,4 @@
 - [ ] 规划系统托盘、窗口管理、开机自启实现。
 - [ ] 规划 Windows/macOS/Linux 安装包。
 - [x] 确认日志页覆盖关键诊断信息。（`LogViewerPage` + `FarmLogger` 已实现）
-- [ ] 验证 App 重启后可恢复 Broker 连接和设备列表。
+- [x] 验证 App 重启后可恢复 Broker 连接和设备列表。（`farm_store_test` 覆盖 `exportToRegistry → loadFromRegistry` 恢复打印机列表；`broker_connection_manager_test` 覆盖 `connectFromSavedCredentials` 凭据恢复连接）

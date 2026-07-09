@@ -22,6 +22,6 @@
 
 ## 4. 验证
 
-- [ ] `flutter analyze`
-- [ ] `flutter test`
+- [x] `flutter analyze`（无新增 error/warning，仅遗留 info 级提示）
+- [x] `flutter test`（87 项全部通过）
 - [ ] 手工选择多台设备，验证抽屉提交和失败汇总。

@@ -80,6 +80,23 @@ class FarmSnapshot {
   });
 }
 
+/// 温度历史采样点（30 分钟曲线数据源）
+class TemperatureSample {
+  final DateTime timestamp;
+  final double nozzleTemp;
+  final double? nozzleTarget;
+  final double bedTemp;
+  final double? bedTarget;
+
+  const TemperatureSample({
+    required this.timestamp,
+    required this.nozzleTemp,
+    this.nozzleTarget,
+    required this.bedTemp,
+    this.bedTarget,
+  });
+}
+
 /// 农场打印机状态
 class FarmPrinterState {
   // ── 身份 (永不清) ──
@@ -159,6 +176,16 @@ class FarmPrinterState {
   // ── 快照 (环形缓冲) ──
   static const int maxSnapshots = 50;
   final List<FarmSnapshot> _snapshots = [];
+
+  // ── 温度历史（30 分钟曲线数据源）──
+  /// 采样窗口：保留最近 30 分钟
+  static const Duration tempHistoryWindow = Duration(minutes: 30);
+  /// 最小采样间隔：5 秒一条（30 分钟窗口下约 360 条）
+  static const Duration tempSampleMinInterval = Duration(seconds: 5);
+  /// 缓冲上限（兜底，防止突发高频写入）
+  static const int maxTempSamples = 360;
+  final List<TemperatureSample> _tempHistory = [];
+  DateTime? _lastTempSampleTime;
 
   // ── 原始消息收集 ──
   /// 原始 MQTT 消息环形缓冲（最近 N 条）
@@ -241,6 +268,9 @@ class FarmPrinterState {
 
   /// 快照列表（只读）
   List<FarmSnapshot> get snapshots => List.unmodifiable(_snapshots);
+
+  /// 温度历史采样点（只读，最近 30 分钟）
+  List<TemperatureSample> get tempHistory => List.unmodifiable(_tempHistory);
 
   /// 原始消息列表（只读，最近 maxRawMessages 条）
   List<Map<String, dynamic>> get rawMessages => List.unmodifiable(_rawMessages);
@@ -478,7 +508,53 @@ class FarmPrinterState {
       lastDataTimestamp = eventTime;
     }
     lastStatusTime = DateTime.now();
+
+    // 温度历史采样：本次更新含温度字段时记录一条（5s 节流 + 30min 裁剪）
+    if (_hasTempData(data)) {
+      _maybeRecordTempSample(lastStatusTime);
+    }
     return true;
+  }
+
+  /// 判断展开数据是否含温度相关字段
+  bool _hasTempData(Map<String, dynamic> data) {
+    for (final key in data.keys) {
+      if (key.endsWith('.temperature') || key.endsWith('.target')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 记录一条温度采样（节流 + 按数量与时间裁剪）
+  void _maybeRecordTempSample(DateTime now) {
+    if (_lastTempSampleTime != null &&
+        now.difference(_lastTempSampleTime!) < tempSampleMinInterval) {
+      return;
+    }
+    final nozzle = extruders.isNotEmpty ? extruders.first.currentTemp : 0.0;
+    final nozzleTarget =
+        extruders.isNotEmpty ? extruders.first.targetTemp : null;
+    _tempHistory.add(TemperatureSample(
+      timestamp: now,
+      nozzleTemp: nozzle,
+      nozzleTarget: nozzleTarget,
+      bedTemp: bedTemp?.value ?? 0,
+      bedTarget: bedTarget?.value,
+    ));
+    _lastTempSampleTime = now;
+
+    // 按数量裁剪
+    if (_tempHistory.length > maxTempSamples) {
+      _tempHistory.removeRange(
+          0, _tempHistory.length - maxTempSamples);
+    }
+    // 按时间裁剪：移除超出窗口的旧采样
+    final cutoff = now.subtract(tempHistoryWindow);
+    while (_tempHistory.isNotEmpty &&
+        _tempHistory.first.timestamp.isBefore(cutoff)) {
+      _tempHistory.removeAt(0);
+    }
   }
 
   /// 标记来源（MQTT 或 HTTP）
