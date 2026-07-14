@@ -48,15 +48,17 @@ class BedInspectionService {
 
   /// 检测单台打印机
   ///
-  /// 返回 [BedInspectionResult] 或 null（摄像头不可用、LLM 调用失败等）。
-  Future<BedInspectionResult?> inspectPrinter(FarmPrinterState printer) async {
+  /// 返回检测结果与抓取到的压缩图片字节（任一可为 null：摄像头不可用、
+  /// 下载失败、LLM 失败等）。
+  Future<({BedInspectionResult? result, Uint8List? imageBytes})> inspectPrinter(
+      FarmPrinterState printer) async {
     final sn = printer.sn;
     final ip = printer.ip;
     final port = printer.port;
 
     if (!printer.hasValidIp) {
       debugPrint('[BedInspection] $sn: 无有效 IP，跳过');
-      return null;
+      return (result: null, imageBytes: null);
     }
 
     try {
@@ -78,7 +80,7 @@ class BedInspectionService {
 
       if (imageBytes == null || imageBytes.length < 100) {
         debugPrint('[BedInspection] $sn: 快照为空或过小，跳过');
-        return null;
+        return (result: null, imageBytes: null);
       }
 
       // 3. 压缩图片
@@ -100,11 +102,11 @@ class BedInspectionService {
             '[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
         debugPrint('[BedInspection] $sn: 原因: ${result.printReadiness.reason}');
       }
-      return result;
+      return (result: result, imageBytes: compressedBytes);
     } catch (e, stack) {
       debugPrint('[BedInspection] $sn: 检测失败 — $e');
       debugPrint('$stack');
-      return null;
+      return (result: null, imageBytes: null);
     }
   }
 
@@ -114,14 +116,20 @@ class BedInspectionService {
   ///   1. 并发启动所有摄像头（MQTT fire-and-forget）
   ///   2. 统一等待一次（确保摄像头启动完毕）
   ///   3. 并发下载+LLM 分析（semaphore=2，避免单台超时阻塞全部）
-  Future<Map<String, BedInspectionResult>> inspectAll(
-    List<FarmPrinterState> printers,
-  ) async {
+  ///
+  /// 返回两张 map（均按 `printer.sn` 建键）：[results] 检测结论、[images] 抓取到的压缩图片字节。
+  /// 图片在下载+压缩成功时即写入（与 LLM 是否成功无关），便于即使 AI 失败也留存图片。
+  Future<
+      ({
+        Map<String, BedInspectionResult> results,
+        Map<String, Uint8List> images
+      })> inspectAll(List<FarmPrinterState> printers) async {
     final results = <String, BedInspectionResult>{};
+    final images = <String, Uint8List>{};
     final onlinePrinters =
         printers.where((p) => p.isOnline && p.hasValidIp).toList();
 
-    if (onlinePrinters.isEmpty) return results;
+    if (onlinePrinters.isEmpty) return (results: results, images: images);
 
     debugPrint(
         '[BedInspection] 开始检测 ${onlinePrinters.length}/${printers.length} 台在线设备');
@@ -143,10 +151,9 @@ class BedInspectionService {
         await semaphore.acquire();
         try {
           debugPrint('[BedInspection] ▶ ${printer.sn} 开始');
-          final result = await _downloadAndAnalyze(printer);
-          if (result != null && result.sn.isNotEmpty) {
-            results[result.sn] = result;
-          }
+          final (:result, :imageBytes) = await _downloadAndAnalyze(printer);
+          if (result != null) results[printer.sn] = result;
+          if (imageBytes != null) images[printer.sn] = imageBytes;
           debugPrint(
               '[BedInspection] ◀ ${printer.sn} ${result != null ? "✅" : "❌"}');
         } finally {
@@ -156,13 +163,16 @@ class BedInspectionService {
     );
 
     debugPrint(
-        '[BedInspection] 检测完成: ${results.length}/${onlinePrinters.length} 成功');
-    return results;
+        '[BedInspection] 检测完成: 结果 ${results.length}/${onlinePrinters.length}，图片 ${images.length}/${onlinePrinters.length}');
+    return (results: results, images: images);
   }
 
   /// 下载快照 + LLM 分析（不含摄像头启动）
-  Future<BedInspectionResult?> _downloadAndAnalyze(
-      FarmPrinterState printer) async {
+  ///
+  /// 返回检测结果与**抓取到的压缩图片字节**。imageBytes 在下载+压缩成功时即有值，
+  /// 与 LLM 是否成功无关——便于即使 LLM 失败也把图片记录下来。
+  Future<({BedInspectionResult? result, Uint8List? imageBytes})>
+      _downloadAndAnalyze(FarmPrinterState printer) async {
     final sn = printer.sn;
     final ip = printer.ip;
     final port = printer.port;
@@ -181,7 +191,7 @@ class BedInspectionService {
 
       if (imageBytes == null || imageBytes.length < 100) {
         debugPrint('[BedInspection] $sn: 快照为空或过小，跳过');
-        return null;
+        return (result: null, imageBytes: null);
       }
 
       // 压缩图片
@@ -199,11 +209,11 @@ class BedInspectionService {
         debugPrint(
             '[BedInspection] $sn: 建议: ${result.printReadiness.recommendedActionLabel}');
       }
-      return result;
+      return (result: result, imageBytes: compressedBytes);
     } catch (e, stack) {
       debugPrint('[BedInspection] $sn: 下载/分析失败 — $e');
       debugPrint('$stack');
-      return null;
+      return (result: null, imageBytes: null);
     }
   }
 

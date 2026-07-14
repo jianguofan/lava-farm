@@ -13,8 +13,9 @@ import 'features/farm/presentation/pages/broker_setup_page.dart';
 import 'features/farm/presentation/pages/farm_dashboard_page.dart';
 import 'features/farm/presentation/pages/discovery_wizard_page.dart';
 import 'features/farm/presentation/pages/settings_page.dart';
-import 'features/farm/presentation/pages/batch_print_page.dart';
+import 'features/farm/presentation/pages/batch_print/batch_print_page.dart';
 import 'features/farm/presentation/pages/log_viewer_page.dart';
+import 'features/farm/presentation/pages/print_head_settings_page.dart';
 import 'features/farm/presentation/pages/product_center_page.dart';
 
 void main() async {
@@ -74,6 +75,10 @@ class LavaFarmApp extends StatelessWidget {
       case '/settings':
         return MaterialPageRoute(
           builder: (_) => const SettingsPage(),
+        );
+      case '/print-head-settings':
+        return MaterialPageRoute(
+          builder: (_) => const PrintHeadSettingsPage(),
         );
       case '/batch-print':
         final args = settings.arguments;

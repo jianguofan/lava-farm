@@ -19,22 +19,26 @@ final bedInspectionServiceProvider = Provider<BedInspectionService?>((ref) {
   return BedInspectionService(router: router);
 });
 
-/// 检测状态（results + loading 合并为单一 state，避免分离字段的响应性问题）
+/// 检测状态（results + images + loading 合并为单一 state，避免分离字段的响应性问题）
 class BedInspectionState {
   final Map<String, BedInspectionResult> results;
+  final Map<String, Uint8List> images; // 抓取到的压缩图片字节，按 SN
   final bool isLoading;
 
   const BedInspectionState({
     this.results = const {},
+    this.images = const {},
     this.isLoading = false,
   });
 
   BedInspectionState copyWith({
     Map<String, BedInspectionResult>? results,
+    Map<String, Uint8List>? images,
     bool? isLoading,
   }) {
     return BedInspectionState(
       results: results ?? this.results,
+      images: images ?? this.images,
       isLoading: isLoading ?? this.isLoading,
     );
   }
@@ -58,10 +62,11 @@ class BedInspectionNotifier extends StateNotifier<BedInspectionState> {
     state = state.copyWith(isLoading: true);
     try {
       final printers = store.allPrinters;
-      final results = await service.inspectAll(printers);
+      final (:results, :images) = await service.inspectAll(printers);
       if (!mounted) return; // 页面已关闭，放弃更新
       state = state.copyWith(
         results: {...state.results, ...results},
+        images: {...state.images, ...images},
         isLoading: false,
       );
     } catch (e, stack) {
@@ -82,13 +87,13 @@ class BedInspectionNotifier extends StateNotifier<BedInspectionState> {
     if (printer == null) return;
 
     try {
-      final result = await service.inspectPrinter(printer);
-      if (result != null && mounted) {
-        final key = result.sn.isNotEmpty ? result.sn : sn;
-        state = state.copyWith(
-          results: {...state.results, key: result},
-        );
-      }
+      final (:result, :imageBytes) = await service.inspectPrinter(printer);
+      if (!mounted) return;
+      final newResults = Map<String, BedInspectionResult>.from(state.results);
+      final newImages = Map<String, Uint8List>.from(state.images);
+      if (result != null) newResults[sn] = result;
+      if (imageBytes != null) newImages[sn] = imageBytes;
+      state = state.copyWith(results: newResults, images: newImages);
     } catch (e) {
       debugPrint('[BedInspectionNotifier] inspectOne($sn) 失败: $e');
     }
@@ -101,8 +106,8 @@ class BedInspectionNotifier extends StateNotifier<BedInspectionState> {
 }
 
 /// 检测结果 Provider（state 包含 results + isLoading）
-final bedInspectionResultsProvider = StateNotifierProvider<
-    BedInspectionNotifier, BedInspectionState>((ref) {
+final bedInspectionResultsProvider =
+    StateNotifierProvider<BedInspectionNotifier, BedInspectionState>((ref) {
   final service = ref.watch(bedInspectionServiceProvider);
   final store = ref.watch(farmStoreProvider);
   return BedInspectionNotifier(service, store);
@@ -117,6 +122,11 @@ final bedInspectionLoadingProvider = Provider<bool>((ref) {
 final bedInspectionResultsMapProvider =
     Provider<Map<String, BedInspectionResult>>((ref) {
   return ref.watch(bedInspectionResultsProvider).results;
+});
+
+/// 抓取到的图片 Map（按 SN，精确选择）
+final bedInspectionImagesProvider = Provider<Map<String, Uint8List>>((ref) {
+  return ref.watch(bedInspectionResultsProvider).images;
 });
 
 /// 单台打印机的检测结果（精确重建，不会因其他打印机变化而重建）

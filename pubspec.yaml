@@ -16,6 +16,8 @@ dependencies:
   image: ^4.0.0
   agent_core:
     path: packages/agent_core
+  parse_3mf:  # 3MF 源模型解析（料盘/预览图/耗材用量）
+    path: ../3mfLoad/dart
   # lava_device_sdk:  # 单机 SDK（共享协议层）
   #   path: ../lava_device_sdk
 

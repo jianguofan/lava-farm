@@ -93,6 +93,7 @@ class BatchPrintCoordinator {
   Map<String, (String ip, int port, String apiKey)>? _lastConnectionInfo;
   String? _lastFileName;
   Uint8List? _lastFileBytes;
+  String? _lastPrePrintGcode;
 
   final StreamController<BatchPrintPrinterUpdate> _updateController =
       StreamController<BatchPrintPrinterUpdate>.broadcast();
@@ -106,8 +107,7 @@ class BatchPrintCoordinator {
   Stream<BatchPrintPrinterUpdate> get printerUpdateStream =>
       _updateController.stream;
 
-  Stream<BatchPrintProgress> get progressStream =>
-      _progressController.stream;
+  Stream<BatchPrintProgress> get progressStream => _progressController.stream;
 
   List<String> get failedSns => List.unmodifiable(_failedSns);
 
@@ -122,6 +122,7 @@ class BatchPrintCoordinator {
     required String remoteFileName,
     required FarmCommandGateway gateway,
     int printPlate = 1,
+    String? prePrintGcode,
   }) async {
     _reset();
 
@@ -142,17 +143,20 @@ class BatchPrintCoordinator {
     _lastConnectionInfo = connectionInfo;
     _lastFileName = remoteFileName;
     _lastFileBytes = Uint8List.fromList(fileBytes);
+    _lastPrePrintGcode = prePrintGcode;
 
     _queuedCount = printerSns.length;
     for (final sn in printerSns) {
       _printerStates[sn] = BatchPrintPrinterState.queued;
       // 通知 UI：每台打印机初始排队状态
-      _updateUI(BatchPrintPrinterUpdate(sn: sn, state: BatchPrintPrinterState.queued));
+      _updateUI(BatchPrintPrinterUpdate(
+          sn: sn, state: BatchPrintPrinterState.queued));
     }
     _emitProgress();
 
     final fileSizeKB = (fileBytes.length / 1024).toStringAsFixed(0);
-    debugPrint('[BatchPrint] 🚀 开始群控打印: ${printerSns.length}台, 文件=${remoteFileName} (${fileSizeKB}KB)');
+    debugPrint(
+        '[BatchPrint] 🚀 开始群控打印: ${printerSns.length}台, 文件=${remoteFileName} (${fileSizeKB}KB)');
 
     final execStart = DateTime.now();
     final semaphore = _Semaphore(FileUploader.maxConcurrent);
@@ -168,15 +172,23 @@ class BatchPrintCoordinator {
         fileBytes: fileBytes,
         semaphore: semaphore,
         gateway: gateway,
+        prePrintGcode: prePrintGcode,
       ));
     }
 
     await Future.wait(futures);
 
     final execElapsed = DateTime.now().difference(execStart);
-    final successes = _printerStates.values.where((s) => s == BatchPrintPrinterState.success).length;
-    final failures = _printerStates.values.where((s) => s == BatchPrintPrinterState.uploadFailed || s == BatchPrintPrinterState.printFailed).length;
-    debugPrint('[BatchPrint] 🏁 群控打印完成: total=${printerSns.length} ✅=$successes ❌=$failures elapsed=${execElapsed.inSeconds}s');
+    final successes = _printerStates.values
+        .where((s) => s == BatchPrintPrinterState.success)
+        .length;
+    final failures = _printerStates.values
+        .where((s) =>
+            s == BatchPrintPrinterState.uploadFailed ||
+            s == BatchPrintPrinterState.printFailed)
+        .length;
+    debugPrint(
+        '[BatchPrint] 🏁 群控打印完成: total=${printerSns.length} ✅=$successes ❌=$failures elapsed=${execElapsed.inSeconds}s');
   }
 
   /// 重试失败的打印机
@@ -185,7 +197,9 @@ class BatchPrintCoordinator {
     int printPlate = 1,
   }) async {
     if (_failedSns.isEmpty) return;
-    if (_lastConnectionInfo == null || _lastFileName == null || _lastFileBytes == null) return;
+    if (_lastConnectionInfo == null ||
+        _lastFileName == null ||
+        _lastFileBytes == null) return;
 
     final failedCopy = List<String>.from(_failedSns);
     _failedSns.clear();
@@ -197,7 +211,8 @@ class BatchPrintCoordinator {
       _printerStates[sn] = BatchPrintPrinterState.queued;
       _errors.remove(sn);
       _elapsed.remove(sn);
-      _updateUI(BatchPrintPrinterUpdate(sn: sn, state: BatchPrintPrinterState.queued));
+      _updateUI(BatchPrintPrinterUpdate(
+          sn: sn, state: BatchPrintPrinterState.queued));
     }
     _emitProgress();
 
@@ -216,14 +231,18 @@ class BatchPrintCoordinator {
         fileBytes: _lastFileBytes!,
         semaphore: semaphore,
         gateway: gateway,
+        prePrintGcode: _lastPrePrintGcode,
       ));
     }
 
     await Future.wait(futures);
 
     final retryElapsed = DateTime.now().difference(retryStart);
-    final retrySuc = _printerStates.values.where((s) => s == BatchPrintPrinterState.success).length;
-    debugPrint('[BatchPrint] 🏁 重试完成: ${retrySuc}/${failedCopy.length} 成功 elapsed=${retryElapsed.inSeconds}s');
+    final retrySuc = _printerStates.values
+        .where((s) => s == BatchPrintPrinterState.success)
+        .length;
+    debugPrint(
+        '[BatchPrint] 🏁 重试完成: ${retrySuc}/${failedCopy.length} 成功 elapsed=${retryElapsed.inSeconds}s');
   }
 
   /// 取消指定打印机的上传
@@ -258,6 +277,7 @@ class BatchPrintCoordinator {
     required List<int> fileBytes,
     required _Semaphore semaphore,
     required FarmCommandGateway gateway,
+    String? prePrintGcode,
   }) async {
     final pipelineStart = DateTime.now();
     await semaphore.acquire();
@@ -271,7 +291,8 @@ class BatchPrintCoordinator {
       final startTime = DateTime.now();
 
       _transition(sn, BatchPrintPrinterState.uploading);
-      debugPrint('[BatchPrint] $sn: 📤 开始上传 $fileName (${(fileBytes.length / 1024).toStringAsFixed(0)}KB)');
+      debugPrint(
+          '[BatchPrint] $sn: 📤 开始上传 $fileName (${(fileBytes.length / 1024).toStringAsFixed(0)}KB)');
 
       final cancelToken = UploadCancelToken();
       _cancelTokens[sn] = cancelToken;
@@ -313,9 +334,23 @@ class BatchPrintCoordinator {
 
       _transition(sn, BatchPrintPrinterState.uploadDone);
 
+      // 打印前下发耗材→打印头映射 G-code（多色映射）。失败仅记录，不阻断打印。
+      if (prePrintGcode != null && prePrintGcode.isNotEmpty) {
+        debugPrint('[BatchPrint] $sn: 🎨 下发耗材映射 G-code');
+        final mapResult = await gateway.sendToOne(
+          sn: sn,
+          method: 'printer.gcode.script',
+          params: {'script': prePrintGcode},
+        );
+        if (!mapResult.success) {
+          debugPrint('[BatchPrint] $sn: ⚠️ 耗材映射下发失败（继续打印）: ${mapResult.error}');
+        }
+      }
+
       _transition(sn, BatchPrintPrinterState.startingPrint);
       final printStart = DateTime.now();
-      debugPrint('[BatchPrint] $sn: 🖨️ 发送打印命令 type=$fileType path=$fileName plate=$printPlate');
+      debugPrint(
+          '[BatchPrint] $sn: 🖨️ 发送打印命令 type=$fileType path=$fileName plate=$printPlate');
 
       final printResult = await gateway.sendToOne(
         sn: sn,
@@ -334,7 +369,8 @@ class BatchPrintCoordinator {
 
       if (printResult.success) {
         final totalElapsed = DateTime.now().difference(pipelineStart);
-        debugPrint('[BatchPrint] $sn: 🎉 全部完成! upload=${uploadElapsed.inMilliseconds}ms '
+        debugPrint(
+            '[BatchPrint] $sn: 🎉 全部完成! upload=${uploadElapsed.inMilliseconds}ms '
             'print=${printElapsed.inMilliseconds}ms total=${totalElapsed.inMilliseconds}ms');
         _transition(sn, BatchPrintPrinterState.success,
             elapsed: DateTime.now().difference(startTime));
@@ -349,16 +385,29 @@ class BatchPrintCoordinator {
     }
   }
 
-  void _transition(String sn, BatchPrintPrinterState state, {Duration? elapsed}) {
+  void _transition(String sn, BatchPrintPrinterState state,
+      {Duration? elapsed}) {
     _printerStates[sn] = state;
     if (elapsed != null) _elapsed[sn] = elapsed;
 
     switch (state) {
-      case BatchPrintPrinterState.uploading:   _queuedCount--; _uploadingCount++; break;
-      case BatchPrintPrinterState.uploadDone:   _uploadingCount--; _uploadDoneCount++; break;
-      case BatchPrintPrinterState.startingPrint: _uploadDoneCount--; _startingPrintCount++; break;
-      case BatchPrintPrinterState.success:      _startingPrintCount--; break;
-      default: break;
+      case BatchPrintPrinterState.uploading:
+        _queuedCount--;
+        _uploadingCount++;
+        break;
+      case BatchPrintPrinterState.uploadDone:
+        _uploadingCount--;
+        _uploadDoneCount++;
+        break;
+      case BatchPrintPrinterState.startingPrint:
+        _uploadDoneCount--;
+        _startingPrintCount++;
+        break;
+      case BatchPrintPrinterState.success:
+        _startingPrintCount--;
+        break;
+      default:
+        break;
     }
 
     _updateUI(BatchPrintPrinterUpdate(sn: sn, state: state, elapsed: elapsed));
@@ -373,7 +422,8 @@ class BatchPrintCoordinator {
     if (prev == BatchPrintPrinterState.startingPrint) _startingPrintCount--;
 
     final failState = prev == BatchPrintPrinterState.uploading ||
-            prev == BatchPrintPrinterState.queued || prev == null
+            prev == BatchPrintPrinterState.queued ||
+            prev == null
         ? BatchPrintPrinterState.uploadFailed
         : BatchPrintPrinterState.printFailed;
 
