@@ -1,18 +1,19 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../application/providers/bed_inspection_provider.dart';
 import '../../../../application/services/batch_print_coordinator.dart';
 import '../../../../data/farm_printer_state.dart';
 import '../../../../domain/models/bed_inspection_result.dart';
 import 'inspection_status_line.dart';
 
 /// 可选打印机卡片（含摄像头快照 + 执行状态图标）。
-class SelectablePrinterCard extends StatelessWidget {
+class SelectablePrinterCard extends ConsumerWidget {
   final FarmPrinterState printer;
   final bool isSelected;
   final bool isLocked; // isExecuting || isDone → 禁用点击
-  final bool isInspecting;
   final BedInspectionResult? inspectionResult;
   final BatchPrintPrinterState? printerState;
   final VoidCallback? onToggle;
@@ -26,7 +27,6 @@ class SelectablePrinterCard extends StatelessWidget {
     required this.printer,
     required this.isSelected,
     required this.isLocked,
-    required this.isInspecting,
     required this.inspectionResult,
     required this.printerState,
     required this.onToggle,
@@ -34,7 +34,9 @@ class SelectablePrinterCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 逐台检测态：仅本卡片的 inspecting 翻转时重建，不波及其余卡片
+    final isInspecting = ref.watch(bedInspectionInspectingProvider(printer.sn));
     final isOnline = printer.isOnline && printer.ip != '—';
     final frameUrl =
         'http://${printer.ip}:${printer.port}/server/files/camera/monitor.jpg';
@@ -83,7 +85,7 @@ class SelectablePrinterCard extends StatelessWidget {
                     const SizedBox(width: 4),
                     Expanded(
                       child: Text(
-                        printer.displayName ?? printer.sn,
+                        printer.displayLabel,
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
@@ -95,11 +97,6 @@ class SelectablePrinterCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text(
-                  printer.sn,
-                  style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
-                  overflow: TextOverflow.ellipsis,
-                ),
                 Text(
                   '${printer.ip}:${printer.port}',
                   style: TextStyle(fontSize: 9, color: Colors.grey.shade500),

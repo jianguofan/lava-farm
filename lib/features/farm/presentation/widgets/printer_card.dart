@@ -134,7 +134,7 @@ class _CardHeader extends StatelessWidget {
         // 名称
         Expanded(
           child: Text(
-            printer.displayName ?? printer.sn,
+            printer.displayLabel,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),

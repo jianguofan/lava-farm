@@ -66,7 +66,7 @@ class _PrinterDetailPageState extends ConsumerState<PrinterDetailPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(printer.displayName ?? printer.sn),
+        title: Text(printer.displayLabel),
         actions: [
           _ConnectionChip(printer: printer),
           const SizedBox(width: 8),
@@ -219,6 +219,7 @@ class _MetadataCard extends StatelessWidget {
 
             // ── 基本信息 ──
             _MetaRow('序列号', printer.sn),
+            _MetaRow('设备名', printer.deviceName ?? '—'),
             _MetaRow('主机名', printer.hostname ?? '—'),
             _IpRefreshRow(sn: printer.sn, ip: printer.ip, port: printer.port),
             _MetaRow('分组', printer.group ?? '未分组'),

@@ -46,7 +46,7 @@ class PendingPrinterCard extends StatelessWidget {
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
-                      printer.displayName ?? printer.sn,
+                      printer.displayLabel,
                       style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -54,10 +54,6 @@ class PendingPrinterCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              Text(printer.sn,
-                  style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
-                  overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 2),
               Text('IP 解析中...', style: TextStyle(fontSize: 9, color: Colors.orange.shade600)),
               const SizedBox(height: 4),
               // 检测结果（仅显示文字状态，无图因为 IP 未知）

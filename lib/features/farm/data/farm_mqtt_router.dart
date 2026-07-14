@@ -138,10 +138,14 @@ class FarmMqttRouter {
     _probeAll();
     _probeTimer = Timer.periodic(_probeInterval, (_) => _probeAll());
 
-    // 启动 IP 解析定时器：每 30s 对在线但无有效 IP 的打印机重试
+    // 启动 IP 解析 + 设备名解析定时器：每 30s 对在线但缺 IP / 缺设备名的打印机重试
     _ipResolveTimer?.cancel();
     resolveIpsForUnknownDevices();
-    _ipResolveTimer = Timer.periodic(_ipResolveInterval, (_) => resolveIpsForUnknownDevices());
+    resolveDeviceNames();
+    _ipResolveTimer = Timer.periodic(_ipResolveInterval, (_) {
+      resolveIpsForUnknownDevices();
+      resolveDeviceNames();
+    });
   }
 
   /// 停止路由
@@ -556,6 +560,41 @@ class FarmMqttRouter {
     _ipCacheStore.update(sn, ip);
   }
 
+  /// 拉取在线但尚未拿到设备名（machine.system_info.product_info.device_name）的设备名。
+  ///
+  /// 发送 machine.system_info 并经 [_extractAndUpdateIp] 提取 device_name（顺带刷新 IP），
+  /// 使网格等列表页展示设备设置的名字而非 SN。内部去重，可安全重复调用。
+  void resolveDeviceNames() {
+    for (final printer in _store.allPrinters) {
+      final sn = printer.sn;
+      if (!printer.isOnline) continue;
+      final dev = printer.deviceName;
+      if (dev != null && dev.isNotEmpty) continue;
+      if (_nameResolvingSns.contains(sn)) continue;
+      _resolveNameInBackground(sn);
+    }
+  }
+
+  /// 通过 MQTT machine.system_info 拉取设备名（fire-and-forget，[resolveDeviceNames] 调用）。
+  /// 复用 [_extractAndUpdateIp] 提取 device_name（顺带刷新 IP）。
+  final Set<String> _nameResolvingSns = {};
+
+  void _resolveNameInBackground(String sn) {
+    _nameResolvingSns.add(sn);
+    Future.microtask(() async {
+      try {
+        final result = await sendCommand(sn, 'machine.system_info');
+        if (result.success && result.data != null) {
+          _extractAndUpdateIp(sn, result.data!); // 内含 device_name 提取
+        }
+      } catch (_) {
+        // 静默失败，下次定时再试
+      } finally {
+        _nameResolvingSns.remove(sn);
+      }
+    });
+  }
+
   /// 从 machine.system_info 响应中提取 IP 并更新到打印机状态
   ///
   /// 响应格式:
@@ -565,6 +604,16 @@ class FarmMqttRouter {
   void _extractAndUpdateIp(String sn, Map<String, dynamic> data) {
     final sysInfo = data['system_info'] as Map<String, dynamic>?;
     if (sysInfo == null) return;
+
+    // product_info.device_name：设备设置的名字（供网格等列表页展示）
+    final productInfo = sysInfo['product_info'] as Map<String, dynamic>?;
+    final deviceName = productInfo?['device_name']?.toString();
+    if (deviceName != null && deviceName.isNotEmpty) {
+      _store.updatePrinter(sn, (p) {
+        p.deviceName = deviceName;
+        return p;
+      });
+    }
 
     final network = sysInfo['network'] as Map<String, dynamic>?;
     if (network == null) return;

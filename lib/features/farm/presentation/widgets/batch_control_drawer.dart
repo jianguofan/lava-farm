@@ -183,7 +183,7 @@ class _BatchControlDrawerState extends State<BatchControlDrawer> {
             DataRow(cells: [
               DataCell(Text('${i + 1}')),
               DataCell(Text(widget.selectedPrinters[i].model ?? 'U1')),
-              DataCell(Text(widget.selectedPrinters[i].displayName ?? widget.selectedPrinters[i].sn)),
+              DataCell(Text(widget.selectedPrinters[i].displayLabel)),
               DataCell(Text(_statusLabel(widget.selectedPrinters[i]))),
             ]),
         ],

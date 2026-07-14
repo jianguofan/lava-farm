@@ -110,6 +110,7 @@ class FarmPrinterState {
 
   // ── Moonraker server.info / printer.info 元数据 ──
   String? hostname;         // printer.info.hostname
+  String? deviceName;       // machine.system_info.product_info.device_name（设备设置的名字）
   String? softwareVersion;  // printer.info.software_version
   String? cpuInfo;          // printer.info.cpu_info
   String? klippyState;      // server.info.klippy_state
@@ -207,6 +208,7 @@ class FarmPrinterState {
     this.model,
     this.firmwareVersion,
     this.hostname,
+    this.deviceName,
     this.softwareVersion,
     this.cpuInfo,
     this.klippyState,
@@ -236,6 +238,18 @@ class FarmPrinterState {
 
   /// IP 是否为有效 LAN 地址（非占位符）
   bool get hasValidIp => ip.isNotEmpty && ip != 'MQTT' && ip != '—' && ip != 'Unknown';
+
+  /// 卡片展示名：优先设备设置的名字（machine.system_info.product_info.device_name），
+  /// 其次 hostname、displayName，最后 SN（仅作标识，SN 可在打印机详情页查看）。
+  String get displayLabel {
+    final dev = deviceName;
+    if (dev != null && dev.isNotEmpty) return dev;
+    final hn = hostname;
+    if (hn != null && hn.isNotEmpty) return hn;
+    final dn = displayName;
+    if (dn != null && dn.isNotEmpty) return dn;
+    return sn;
+  }
 
   /// 是否正在打印（以 printState 为主，其他信号仅作缺失时的 fallback）
   bool get isPrinting {

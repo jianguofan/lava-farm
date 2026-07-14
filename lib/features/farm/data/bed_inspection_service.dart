@@ -119,11 +119,21 @@ class BedInspectionService {
   ///
   /// 返回两张 map（均按 `printer.sn` 建键）：[results] 检测结论、[images] 抓取到的压缩图片字节。
   /// 图片在下载+压缩成功时即写入（与 LLM 是否成功无关），便于即使 AI 失败也留存图片。
+  ///
+  /// 渐进回调（可选）：
+  /// - [onStart]：某台开始下载+分析时触发（可用于点亮单卡转圈）。
+  /// - [onResult]：某台完成时触发（result/imageBytes 任一可为 null：下载失败、LLM 失败等）。
+  ///   每台完成即上抛，调用方不必等整批结束即可逐台刷新 UI。
   Future<
       ({
         Map<String, BedInspectionResult> results,
         Map<String, Uint8List> images
-      })> inspectAll(List<FarmPrinterState> printers) async {
+      })> inspectAll(
+    List<FarmPrinterState> printers, {
+    void Function(String sn)? onStart,
+    void Function(String sn, BedInspectionResult? result, Uint8List? imageBytes)?
+        onResult,
+  }) async {
     final results = <String, BedInspectionResult>{};
     final images = <String, Uint8List>{};
     final onlinePrinters =
@@ -143,6 +153,7 @@ class BedInspectionService {
     await Future<void>.delayed(const Duration(milliseconds: 800));
 
     // Phase 2: 并发下载+分析（semaphore=2，单台超时不阻塞其他）
+    // 每台完成即经 onResult 上抛，UI 可逐台刷新而非整批等待。
     debugPrint(
         '[BedInspection] Phase 2: 并发下载+分析 ${onlinePrinters.length} 台 (并发=2)…');
     final semaphore = _Semaphore(2);
@@ -151,9 +162,11 @@ class BedInspectionService {
         await semaphore.acquire();
         try {
           debugPrint('[BedInspection] ▶ ${printer.sn} 开始');
+          onStart?.call(printer.sn);
           final (:result, :imageBytes) = await _downloadAndAnalyze(printer);
           if (result != null) results[printer.sn] = result;
           if (imageBytes != null) images[printer.sn] = imageBytes;
+          onResult?.call(printer.sn, result, imageBytes);
           debugPrint(
               '[BedInspection] ◀ ${printer.sn} ${result != null ? "✅" : "❌"}');
         } finally {

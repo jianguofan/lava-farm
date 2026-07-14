@@ -47,15 +47,16 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
   @override
   void initState() {
     super.initState();
-    // 首帧后立刻触发 IP 解析，不等待 30s 定时器
-    WidgetsBinding.instance.addPostFrameCallback((_) => _triggerIpResolution());
+    // 首帧后立刻触发 IP 解析 + 设备名解析，不等待 30s 定时器
+    WidgetsBinding.instance.addPostFrameCallback((_) => _triggerInitialResolution());
   }
 
-  void _triggerIpResolution() {
+  void _triggerInitialResolution() {
     if (_initialIpFetchDone) return;
     _initialIpFetchDone = true;
     final router = ref.read(farmMqttRouterProvider);
     router?.resolveIpsForUnknownDevices();
+    router?.resolveDeviceNames();
   }
 
   @override
@@ -112,7 +113,7 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
                         _toggleSelection(printer.sn);
                       } else {
                         // 非多选模式下长按 = 弹出删除确认
-                        _showDeleteDialog(context, printer.sn, printer.displayName ?? printer.sn);
+                        _showDeleteDialog(context, printer.sn, printer.displayLabel);
                       }
                       widget.onPrinterLongPress?.call(printer.sn);
                     },
@@ -126,7 +127,7 @@ class _PrinterGridState extends ConsumerState<PrinterGrid> {
                   return Dismissible(
                     key: Key('dismiss_${printer.sn}'),
                     direction: DismissDirection.endToStart,
-                    confirmDismiss: (_) => _confirmDismiss(context, printer.sn, printer.displayName ?? printer.sn),
+                    confirmDismiss: (_) => _confirmDismiss(context, printer.sn, printer.displayLabel),
                     background: Container(
                       alignment: Alignment.centerRight,
                       padding: const EdgeInsets.only(right: 20),

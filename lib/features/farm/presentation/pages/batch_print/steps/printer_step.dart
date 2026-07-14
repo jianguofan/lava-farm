@@ -140,7 +140,6 @@ class PrinterStep extends ConsumerWidget {
                       printer: printer,
                       isSelected: isSelected,
                       isLocked: isExecuting || state.isDone,
-                      isInspecting: isInspecting,
                       inspectionResult: inspectionResults[printer.sn],
                       imageBytes: inspectionImages[printer.sn],
                       printerState: state.printerStates[printer.sn],

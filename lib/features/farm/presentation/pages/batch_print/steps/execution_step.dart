@@ -30,7 +30,30 @@ class ExecutionStep extends ConsumerWidget {
 
     return Column(
       children: [
-        // 操作按钮
+        // 结果汇总面板（完成时）
+        if (isDone && state.lastRecord != null) ResultPanel(record: state.lastRecord!),
+
+        // 主体：执行中→进度面板；待执行→已选打印机列表（供确认）
+        if (isExecuting || isDone)
+          Expanded(
+            child: ExecutionProgressPanel(
+              progress: state.progress,
+              isDone: isDone,
+              printerStates: state.printerStates,
+              updateLog: state.updateLog,
+              onCancelUpload: (sn) =>
+                  ref.read(batchPrintCoordinatorProvider).cancelUpload(sn),
+            ),
+          ),
+        if (!isExecuting && !isDone)
+          Expanded(
+            child: _SelectedPrintersList(
+              selectedSns: state.selectedSns,
+              bySn: bySn,
+            ),
+          ),
+
+        // 打印按钮：位于已选打印机列表下方
         _StartPrintButton(
           isExecuting: isExecuting,
           isDone: isDone,
@@ -43,37 +66,12 @@ class ExecutionStep extends ConsumerWidget {
           onStart: notifier.startPrint,
         ),
 
-        // 结果汇总面板（完成时）
-        if (isDone && state.lastRecord != null) ResultPanel(record: state.lastRecord!),
-
-        // 进度显示
-        if (isExecuting || isDone)
-          Expanded(
-            child: ExecutionProgressPanel(
-              progress: state.progress,
-              isDone: isDone,
-              printerStates: state.printerStates,
-              updateLog: state.updateLog,
-              onCancelUpload: (sn) =>
-                  ref.read(batchPrintCoordinatorProvider).cancelUpload(sn),
-            ),
-          ),
-
         // 完成操作栏
         if (isDone)
           _DoneBar(
             hasFailures: hasFailures,
             onRetry: notifier.retryFailed,
             onBack: () => Navigator.pop(context),
-          ),
-
-        // 待执行：展示选中的打印机列表，供确认
-        if (!isExecuting && !isDone)
-          Expanded(
-            child: _SelectedPrintersList(
-              selectedSns: state.selectedSns,
-              bySn: bySn,
-            ),
           ),
       ],
     );
@@ -231,7 +229,7 @@ class _PrinterRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final online = printer?.isOnline ?? false;
     final willSkip = printer == null || !printer!.hasValidIp || !online;
-    final name = printer?.displayName?.isNotEmpty == true ? printer!.displayName! : sn;
+    final name = printer?.displayLabel ?? sn;
 
     return ListTile(
       dense: true,
@@ -241,7 +239,6 @@ class _PrinterRow extends StatelessWidget {
         color: online ? Colors.green : Colors.grey.shade400,
       ),
       title: Text(name, style: const TextStyle(fontSize: 14)),
-      subtitle: Text(sn, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
       trailing: willSkip
           ? Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
