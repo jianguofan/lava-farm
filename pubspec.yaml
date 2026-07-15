@@ -17,7 +17,7 @@ dependencies:
   agent_core:
     path: packages/agent_core
   parse_3mf:  # 3MF 源模型解析（料盘/预览图/耗材用量）
-    path: ../3mfLoad/dart
+    path: packages/3mfLoad/dart  # git submodule → github.com/jianguofan/3mfLoad
   # lava_device_sdk:  # 单机 SDK（共享协议层）
   #   path: ../lava_device_sdk
 

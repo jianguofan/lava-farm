@@ -6,3 +6,7 @@
 	path = packages/agent_tool
 	url = git@gitlab.lan.snapmaker.com:client_dev_team/agent_tool.git
 	branch = develop
+[submodule "packages/3mfLoad"]
+	path = packages/3mfLoad
+	url = git@github.com:jianguofan/3mfLoad.git
+	branch = main

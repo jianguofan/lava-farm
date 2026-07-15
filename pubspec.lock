@@ -495,7 +495,7 @@ packages:
   parse_3mf:
     dependency: "direct main"
     description:
-      path: "../3mfLoad/dart"
+      path: "packages/3mfLoad/dart"
       relative: true
     source: path
     version: "0.1.0"
