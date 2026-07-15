@@ -124,7 +124,7 @@ class MaterialStep extends ConsumerWidget {
                                     },
                                   ),
                                 ),
-                              _AddSlotCard(onTap: notifier.addMaterial),
+                              // _AddSlotCard(onTap: notifier.addMaterial),
                             ],
                           ),
                       ],
