@@ -186,13 +186,8 @@ class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
 
   // ─── 辅助 ──────────────────────────────────────────────────────
 
-  String _deviceLabel(FarmPrinterState p) {
-    if (p.displayName != null && p.displayName!.isNotEmpty) {
-      return p.displayName!;
-    }
-    if (p.hostname != null && p.hostname!.isNotEmpty) return p.hostname!;
-    return p.sn.length > 6 ? p.sn.substring(p.sn.length - 6) : p.sn;
-  }
+  /// 设备展示名：优先设备设置的名字（device_name），与全局 displayLabel 一致。
+  String _deviceLabel(FarmPrinterState p) => p.displayLabel;
 
   // ─── UI ────────────────────────────────────────────────────────
 
