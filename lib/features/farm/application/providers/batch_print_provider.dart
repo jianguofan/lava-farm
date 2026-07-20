@@ -28,6 +28,48 @@ import '../../domain/services/pre_print_gcode.dart';
 /// copyWith 中表示「未传参」的哨兵值，用于区分「保持原值」与「显式置 null」。
 const _unset = Object();
 
+/// 向导步骤种类。多盘模式下「确认材料 + 选择设备」合并为一个 [multiConfig] 步。
+enum StepKind { product, material, multiConfig, printers, execute }
+
+/// 向导步骤描述：种类 + 显示标签。步骤列表随模式变化（见 [BatchPrintState.effectiveSteps]）。
+class BatchStepDescriptor {
+  final StepKind kind;
+  final String label;
+  const BatchStepDescriptor(this.kind, this.label);
+}
+
+/// 多盘同打：单盘的独立配置——绑定的打印机子集 + 该盘耗材→打印头映射。
+class PlateAssignment {
+  final int plateId;
+  final String name;
+  final Set<String> printerSns;
+  final List<ProductMaterial> materials;
+  final bool enabled;
+
+  const PlateAssignment({
+    required this.plateId,
+    this.name = '',
+    this.printerSns = const <String>{},
+    this.materials = const [],
+    this.enabled = true,
+  });
+
+  PlateAssignment copyWith({
+    int? plateId,
+    String? name,
+    Set<String>? printerSns,
+    List<ProductMaterial>? materials,
+    bool? enabled,
+  }) =>
+      PlateAssignment(
+        plateId: plateId ?? this.plateId,
+        name: name ?? this.name,
+        printerSns: printerSns ?? this.printerSns,
+        materials: materials ?? this.materials,
+        enabled: enabled ?? this.enabled,
+      );
+}
+
 /// 页面入参（路由构造参数），作为 family 的 key。
 class BatchPrintArgs {
   /// 从仪表盘传入的预选打印机 SN 集合
@@ -72,6 +114,10 @@ class BatchPrintState {
   final Set<String> selectedSns;
   final int printPlate;
 
+  // ── 多盘同打（>1 盘时可选模式；各盘独立绑定打印机 + 耗材映射）──
+  final bool multiPlateMode;
+  final List<PlateAssignment> assignments;
+
   // ── 执行 ──
   final bool isExecuting;
   final bool isDone;
@@ -96,6 +142,8 @@ class BatchPrintState {
     this.materials = const [],
     this.selectedSns = const {},
     this.printPlate = 1,
+    this.multiPlateMode = false,
+    this.assignments = const [],
     this.isExecuting = false,
     this.isDone = false,
     this.printerStates = const {},
@@ -113,17 +161,45 @@ class BatchPrintState {
             s == BatchPrintPrinterState.printFailed,
       );
 
-  /// 前进到 step 需满足的前置条件
-  bool canAdvanceTo(int step) => switch (step) {
-        1 => filePath != null,
-        2 => materials.isNotEmpty,
-        3 => selectedSns.isNotEmpty,
-        _ => false,
-      };
+  /// 当前模式下的向导步骤列表。
+  /// 单盘：选择文件 → 确认材料 → 选择设备 → 执行投产（4 步）。
+  /// 多盘：选择文件 → 多盘配置 → 执行投产（3 步，耗材+设备合并）。
+  /// [currentStep] 是该列表的索引。
+  List<BatchStepDescriptor> get effectiveSteps => multiPlateMode
+      ? const [
+          BatchStepDescriptor(StepKind.product, '选择产品'),
+          BatchStepDescriptor(StepKind.multiConfig, '多盘配置'),
+          BatchStepDescriptor(StepKind.execute, '执行投产'),
+        ]
+      : const [
+          BatchStepDescriptor(StepKind.product, '选择产品'),
+          BatchStepDescriptor(StepKind.material, '确认材料'),
+          BatchStepDescriptor(StepKind.printers, '选择设备'),
+          BatchStepDescriptor(StepKind.execute, '执行投产'),
+        ];
+
+  /// 前进到 step 需满足的前置条件：进入 step 需其前一步（step-1）产出齐备。
+  bool canAdvanceTo(int step) {
+    if (step <= 0 || step >= effectiveSteps.length) return false;
+    switch (effectiveSteps[step - 1].kind) {
+      case StepKind.product:
+        return filePath != null;
+      case StepKind.material:
+        return materials.isNotEmpty;
+      case StepKind.multiConfig:
+        final enabled = assignments.where((a) => a.enabled).toList();
+        return enabled.isNotEmpty &&
+            enabled.any((a) => a.printerSns.isNotEmpty);
+      case StepKind.printers:
+        return selectedSns.isNotEmpty;
+      case StepKind.execute:
+        return true;
+    }
+  }
 
   /// 是否允许跳转到 step（可回退到已完成步骤，或满足前置条件时前进）
   bool canGoTo(int step) {
-    if (step < 0 || step > 3) return false;
+    if (step < 0 || step >= effectiveSteps.length) return false;
     if (step <= currentStep) return true;
     for (var s = currentStep + 1; s <= step; s++) {
       if (!canAdvanceTo(s)) return false;
@@ -152,12 +228,16 @@ class BatchPrintState {
     Object? snackbarMessage = _unset,
     bool? isParsing,
     Map<String, Uint8List>? previewImages,
+    bool? multiPlateMode,
+    List<PlateAssignment>? assignments,
   }) {
     return BatchPrintState(
       currentStep: currentStep ?? this.currentStep,
       materials: materials ?? this.materials,
       selectedSns: selectedSns ?? this.selectedSns,
       printPlate: printPlate ?? this.printPlate,
+      multiPlateMode: multiPlateMode ?? this.multiPlateMode,
+      assignments: assignments ?? this.assignments,
       isExecuting: isExecuting ?? this.isExecuting,
       isDone: isDone ?? this.isDone,
       printerStates: printerStates ?? this.printerStates,
@@ -421,10 +501,138 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // 多盘同打
+  // ═══════════════════════════════════════════════════════════
+
+  /// 切换多盘同打模式。开启要求已解析出 >1 个盘；按各盘生成独立配置
+  /// （耗材自动匹配、空打印机、全部启用），并钳制 currentStep。
+  /// 关闭则清空配置、回单盘（重选第一盘）。
+  void setMultiPlateMode(bool value) {
+    if (value == state.multiPlateMode) return;
+    if (value) {
+      final partitions =
+          state.parsed3mf?.profiles.firstOrNull?.partitions ?? const [];
+      if (partitions.length <= 1) return;
+      final assignments = [
+        for (final p in partitions)
+          PlateAssignment(
+            plateId: p.id,
+            name: p.name,
+            materials: _autoMatch(_materialsFromPlate(state.parsed3mf, p.id)),
+            printerSns: const <String>{},
+            enabled: true,
+          ),
+      ];
+      state = state.copyWith(
+        multiPlateMode: true,
+        assignments: assignments,
+        currentStep: state.currentStep > 1 ? 1 : state.currentStep,
+      );
+    } else {
+      final first = state.parsed3mf?.profiles.firstOrNull?.partitions.firstOrNull;
+      final plateId = first?.id ?? state.printPlate;
+      state = state.copyWith(
+        multiPlateMode: false,
+        assignments: const [],
+        printPlate: plateId,
+        materials: _autoMatch(_materialsFromPlate(state.parsed3mf, plateId)),
+        currentStep: state.currentStep > 1 ? 1 : state.currentStep,
+      );
+    }
+  }
+
+  /// 给某盘切换绑定一台打印机（MOVE 语义：sn 已在其它盘则先移除，维持各盘互斥；
+  /// 在目标盘则取消绑定并释放）。
+  void togglePlatePrinter(int plateId, String sn) {
+    final targetIdx = state.assignments.indexWhere((a) => a.plateId == plateId);
+    if (targetIdx < 0) return;
+    final wasInTarget = state.assignments[targetIdx].printerSns.contains(sn);
+    final list = <PlateAssignment>[];
+    for (final a in state.assignments) {
+      final sns = Set<String>.from(a.printerSns)..remove(sn);
+      if (a.plateId == plateId && !wasInTarget) sns.add(sn);
+      list.add(a.copyWith(printerSns: sns));
+    }
+    state = state.copyWith(assignments: list);
+  }
+
+  /// 启用/禁用某盘。禁用时清空其绑定的打印机（释放给其它盘）。
+  void togglePlateEnabled(int plateId) {
+    final list = state.assignments.map((a) {
+      if (a.plateId != plateId) return a;
+      final nowEnabled = !a.enabled;
+      return a.copyWith(
+        enabled: nowEnabled,
+        printerSns: nowEnabled ? a.printerSns : const <String>{},
+      );
+    }).toList();
+    state = state.copyWith(assignments: list);
+  }
+
+  /// 给某盘第 [materialIndex] 条耗材指定打印头 [head]（1-based）。
+  void assignPlateHead(int plateId, int materialIndex, int head) {
+    state = state.copyWith(
+        assignments:
+            _withPlateMaterial(plateId, materialIndex, (m) => m.copyWith(assignedHead: head)));
+  }
+
+  /// 清除某盘第 [materialIndex] 条耗材的打印头分配。
+  /// 注意：[ProductMaterial.copyWith] 无法把字段置回 null，这里必须重建对象。
+  void clearPlateHead(int plateId, int materialIndex) {
+    state = state.copyWith(
+        assignments: _withPlateMaterial(plateId, materialIndex, (m) => ProductMaterial(
+              colorName: m.colorName,
+              argb: m.argb,
+              grams: m.grams,
+              extruderIndex: m.extruderIndex,
+              assignedHead: null,
+            )));
+  }
+
+  /// 对某盘耗材重新自动匹配打印头。
+  void autoMatchPlate(int plateId) {
+    final list = state.assignments
+        .map((a) =>
+            a.plateId == plateId ? a.copyWith(materials: _autoMatch(a.materials)) : a)
+        .toList();
+    state = state.copyWith(assignments: list);
+  }
+
+  /// 对所有盘耗材重新自动匹配打印头。
+  void autoMatchAll() {
+    final list = state.assignments
+        .map((a) => a.copyWith(materials: _autoMatch(a.materials)))
+        .toList();
+    state = state.copyWith(assignments: list);
+  }
+
+  /// 重建 assignments，仅替换 [plateId] 盘第 [materialIndex] 条耗材（由 [transform] 映射）。
+  List<PlateAssignment> _withPlateMaterial(
+    int plateId,
+    int materialIndex,
+    ProductMaterial Function(ProductMaterial) transform,
+  ) {
+    return [
+      for (final a in state.assignments)
+        if (a.plateId != plateId)
+          a
+        else
+          a.copyWith(materials: [
+            for (var i = 0; i < a.materials.length; i++)
+              i == materialIndex ? transform(a.materials[i]) : a.materials[i],
+          ]),
+    ];
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // Step4: 执行
   // ═══════════════════════════════════════════════════════════
 
   Future<void> startPrint() async {
+    if (state.multiPlateMode) {
+      await _startMultiPlatePrint();
+      return;
+    }
     if (state.filePath == null || state.selectedSns.isEmpty) return;
 
     final store = _ref.read(farmStoreProvider);
@@ -488,6 +696,92 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
     await _persistRecord(validSns);
   }
 
+  /// 多盘同打执行：每个 enabled 盘的打印机打各自绑定盘，耗材映射按盘独立。
+  Future<void> _startMultiPlatePrint() async {
+    if (state.filePath == null) return;
+    final enabledPlates = state.assignments.where((a) => a.enabled).toList();
+    if (enabledPlates.isEmpty) {
+      state = state.copyWith(snackbarMessage: '没有启用的打印盘');
+      return;
+    }
+
+    final store = _ref.read(farmStoreProvider);
+    final connectionInfo = <String, (String ip, int port, String apiKey)>{};
+    final plateBySn = <String, int>{};
+    final gcodeBySn = <String, String?>{};
+    final skipped = <String>[];
+
+    for (final a in enabledPlates) {
+      final gcode = buildExtruderMapGcode(a.materials);
+      for (final sn in a.printerSns) {
+        final printer = store.getPrinter(sn);
+        if (printer == null) continue;
+        if (!printer.hasValidIp || !printer.isOnline) {
+          skipped.add(printer.displayName ?? sn);
+          continue;
+        }
+        connectionInfo[sn] = (printer.ip, printer.port, '');
+        plateBySn[sn] = a.plateId;
+        gcodeBySn[sn] = gcode;
+      }
+    }
+
+    // 每个 enabled 盘至少一台可用打印机
+    for (final a in enabledPlates) {
+      if (a.printerSns.every((sn) => !connectionInfo.containsKey(sn))) {
+        state = state.copyWith(
+            snackbarMessage: '盘 ${a.plateId}（${a.name}）没有可用的打印机');
+        return;
+      }
+    }
+
+    if (skipped.isNotEmpty) {
+      state = state.copyWith(
+          snackbarMessage: '${skipped.join("、")} 不可用（离线或 IP 未知）');
+    }
+    if (connectionInfo.isEmpty) {
+      if (state.snackbarMessage == null) {
+        state = state.copyWith(snackbarMessage: '没有可用的打印机');
+      }
+      return;
+    }
+
+    final gateway = _ref.read(farmCommandGatewayProvider);
+    if (gateway == null) {
+      state = state.copyWith(snackbarMessage: 'MQTT 未连接，无法启动打印');
+      return;
+    }
+
+    state = state.copyWith(
+      isExecuting: true,
+      isDone: false,
+      printerStates: const {},
+      progress: null,
+      updateLog: const [],
+      execStartTime: DateTime.now(),
+      lastRecord: null,
+      snackbarMessage: null,
+    );
+
+    final coordinator = _ref.read(batchPrintCoordinatorProvider);
+    _subscribe(coordinator);
+
+    await coordinator.execute(
+      printerSns: connectionInfo.keys.toList(),
+      connectionInfo: connectionInfo,
+      localFilePath: state.filePath!,
+      remoteFileName: state.fileName!,
+      gateway: gateway,
+      // 以下两个兜底值仅在 plateBySn/gcodeBySn 未覆盖时生效；实际按打印机解析。
+      printPlate: enabledPlates.first.plateId,
+      prePrintGcode: null,
+      plateBySn: plateBySn,
+      gcodeBySn: gcodeBySn,
+    );
+
+    await _persistRecordMulti(enabledPlates, connectionInfo.keys.toList());
+  }
+
   Future<void> retryFailed() async {
     final gateway = _ref.read(farmCommandGatewayProvider);
     if (gateway == null) {
@@ -498,11 +792,20 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
     state = state.copyWith(isExecuting: true, isDone: false, progress: null);
 
     final coordinator = _ref.read(batchPrintCoordinatorProvider);
-    await coordinator.retryFailed(
-        gateway: gateway, printPlate: state.printPlate);
-
-    if (!mounted) return;
-    await _persistRecord(state.printerStates.keys.toList());
+    if (state.multiPlateMode) {
+      // 多盘重试：协调器用 execute 时缓存的 plateBySn/gcodeBySn，仍按各盘下发。
+      await coordinator.retryFailed(gateway: gateway);
+      if (!mounted) return;
+      await _persistRecordMulti(
+        state.assignments.where((a) => a.enabled).toList(),
+        state.printerStates.keys.toList(),
+      );
+    } else {
+      await coordinator.retryFailed(
+          gateway: gateway, printPlate: state.printPlate);
+      if (!mounted) return;
+      await _persistRecord(state.printerStates.keys.toList());
+    }
   }
 
   /// 订阅协调器两条流，把更新映射进 state
@@ -570,6 +873,58 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
     await _ref.read(productionHistoryProvider.notifier).add(record);
     if (!mounted) return;
     state = state.copyWith(lastRecord: record);
+  }
+
+  /// 多盘同打：每个 enabled 盘沉淀一条投产记录（按各盘绑定打印机过滤成功/失败）。
+  /// 不写 lastRecord（结果面板在多盘下走进度面板，见 execution_step）。
+  Future<void> _persistRecordMulti(
+      List<PlateAssignment> plates, List<String> validSns) async {
+    final start = state.execStartTime;
+    if (start == null) return;
+    final baseName =
+        state.selectedProduct?.displayName ?? state.fileName ?? '';
+    final finishedAt = DateTime.now();
+
+    for (final a in plates) {
+      final sns = a.printerSns.where(validSns.contains).toList();
+      if (sns.isEmpty) continue;
+
+      var success = 0;
+      var failed = 0;
+      final failures = <String, String>{};
+      for (final sn in sns) {
+        final st = state.printerStates[sn];
+        if (st == BatchPrintPrinterState.success) {
+          success++;
+        } else if (st == BatchPrintPrinterState.uploadFailed ||
+            st == BatchPrintPrinterState.printFailed) {
+          failed++;
+          for (final u in state.updateLog.reversed) {
+            if (u.sn == sn && u.error != null) {
+              failures[sn] = u.error!;
+              break;
+            }
+          }
+        }
+      }
+
+      final record = ProductionRecord(
+        id: '${finishedAt.microsecondsSinceEpoch}_${a.plateId}',
+        productId: state.selectedProduct?.id ?? '',
+        productName: '$baseName · 盘${a.plateId}',
+        fileName: state.fileName ?? '',
+        printerSns: List<String>.unmodifiable(sns),
+        successCount: success,
+        failedCount: failed,
+        failures: failures,
+        printPlate: a.plateId,
+        startedAt: start,
+        finishedAt: finishedAt,
+      );
+
+      await _ref.read(productionHistoryProvider.notifier).add(record);
+      if (!mounted) return;
+    }
   }
 
   void clearSnackbar() {
