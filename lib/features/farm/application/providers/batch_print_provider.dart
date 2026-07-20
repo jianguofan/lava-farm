@@ -363,6 +363,7 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   /// 选择某个打印盘：更新 [printPlate]（决定实际下发打印的盘号），
   /// 以该盘 filaments 重建耗材（filament.id → extruderIndex）并自动匹配打印头。
   void selectPlate(int id) {
+    debugPrint('[BatchPrint] 用户选择盘: $id (之前: ${state.printPlate})');
     state = state.copyWith(
       printPlate: id,
       materials: _autoMatch(_materialsFromPlate(state.parsed3mf, id)),
@@ -652,6 +653,8 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       return;
     }
     if (state.filePath == null || state.selectedSns.isEmpty) return;
+
+    debugPrint('[BatchPrint] 单盘模式开始打印: 盘${state.printPlate}');
 
     final store = _ref.read(farmStoreProvider);
     final connectionInfo = <String, (String ip, int port, String apiKey)>{};
