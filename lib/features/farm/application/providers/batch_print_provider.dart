@@ -364,14 +364,22 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
 
   /// 由解析结果中指定盘的 filaments 生成耗材列表。
   /// extruderIndex = slice filament id（1-based，下发 G-code 的 CONFIG_EXTRUDER）。
-  /// 无切片信息（partition 无 filaments）时返回空，由用户在下一步手动添加。
+  /// 优先使用 partition.filaments；若为空则回退到 profile.filaments（全局耗材）。
   List<ProductMaterial> _materialsFromPlate(Metadata? meta, int plateId) {
-    final partition = meta?.profiles.firstOrNull?.partitions
+    final profile = meta?.profiles.firstOrNull;
+    if (profile == null) return const [];
+
+    final partition = profile.partitions
         .where((p) => p.id == plateId)
         .firstOrNull;
-    if (partition == null) return const [];
+
+    // 优先使用盘级耗材；若为空则回退到全局耗材
+    final filaments = (partition != null && partition.filaments.isNotEmpty)
+        ? partition.filaments
+        : profile.filaments;
+
     return [
-      for (final f in partition.filaments)
+      for (final f in filaments)
         ProductMaterial(
           colorName: (f.type == null || f.type!.isEmpty) ? '耗材' : f.type!,
           argb: _argbFromHex(f.color),
