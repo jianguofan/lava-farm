@@ -16,6 +16,7 @@ import '../../../application/providers/batch_print_provider.dart';
 import '../../../application/providers/bed_inspection_provider.dart';
 import 'steps/execution_step.dart';
 import 'steps/material_step.dart';
+import 'steps/multi_config_step.dart';
 import 'steps/printer_step.dart';
 import 'steps/product_step.dart';
 import 'widgets/batch_stepper.dart';
@@ -100,17 +101,22 @@ class _BatchPrintPageState extends ConsumerState<BatchPrintPage> {
     );
   }
 
-  /// 构建当前步骤内容；Step0~2 附加导航栏，Step3 自带操作按钮不附加。
+  /// 构建当前步骤内容；按当前模式的 [effectiveSteps] 分派。
+  /// 执行步自带操作按钮不附加导航栏，其余步附加上一步/下一步栏。
   Widget _buildStepContent(int step, BatchPrintArgs args) {
+    final steps = ref.read(batchPrintProvider(args)).effectiveSteps;
+    final kind = (step >= 0 && step < steps.length) ? steps[step].kind : null;
     Widget content;
-    switch (step) {
-      case 0:
+    switch (kind) {
+      case StepKind.product:
         content = ProductStep(args: args);
-      case 1:
+      case StepKind.material:
         content = MaterialStep(args: args);
-      case 2:
+      case StepKind.multiConfig:
+        content = MultiConfigStep(args: args);
+      case StepKind.printers:
         content = PrinterStep(args: args);
-      case 3:
+      case StepKind.execute:
         return ExecutionStep(args: args);
       default:
         return const SizedBox.shrink();
@@ -137,9 +143,11 @@ class _StepNavBar extends ConsumerWidget {
     // 必须订阅才能让按钮重新计算。
     final state = ref.watch(batchPrintProvider(args));
     final notifier = ref.read(batchPrintProvider(args).notifier);
-    const nextLabels = ['确认材料', '选择设备', '执行投产'];
+    final steps = state.effectiveSteps;
     final nextStep = step + 1;
-    final canNext = state.canGoTo(nextStep);
+    final hasNext = nextStep < steps.length;
+    final canNext = hasNext && state.canGoTo(nextStep);
+    final nextLabel = hasNext ? steps[nextStep].label : '';
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -155,7 +163,7 @@ class _StepNavBar extends ConsumerWidget {
           ElevatedButton.icon(
             onPressed: canNext ? () => notifier.goToStep(nextStep) : null,
             icon: const Icon(Icons.arrow_forward, size: 18),
-            label: Text('下一步：${nextLabels[step]}'),
+            label: Text('下一步：$nextLabel'),
           ),
         ],
       ),

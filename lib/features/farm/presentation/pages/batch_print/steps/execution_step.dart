@@ -47,10 +47,13 @@ class ExecutionStep extends ConsumerWidget {
           ),
         if (!isExecuting && !isDone)
           Expanded(
-            child: _SelectedPrintersList(
-              selectedSns: state.selectedSns,
-              bySn: bySn,
-            ),
+            child: state.multiPlateMode
+                ? _MultiSelectedList(
+                    assignments: state.assignments, bySn: bySn)
+                : _SelectedPrintersList(
+                    selectedSns: state.selectedSns,
+                    bySn: bySn,
+                  ),
           ),
 
         // 打印按钮：位于已选打印机列表下方
@@ -59,9 +62,9 @@ class ExecutionStep extends ConsumerWidget {
           isDone: isDone,
           canStart: !isExecuting &&
               state.filePath != null &&
-              state.selectedSns.isNotEmpty &&
+              _hasPrintableTarget(state) &&
               gateway != null,
-          count: state.selectedSns.length,
+          count: _selectedPrinterCount(state),
           primaryColor: Theme.of(context).colorScheme.primary,
           onStart: notifier.startPrint,
         ),
@@ -256,6 +259,82 @@ class _PrinterRow extends StatelessWidget {
               printer?.ip ?? '',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
             ),
+    );
+  }
+}
+
+/// 是否有可投产目标：单盘→已选打印机非空；多盘→至少一个启用盘绑定了打印机。
+bool _hasPrintableTarget(BatchPrintState state) {
+  if (state.multiPlateMode) {
+    return state.assignments
+        .where((a) => a.enabled)
+        .any((a) => a.printerSns.isNotEmpty);
+  }
+  return state.selectedSns.isNotEmpty;
+}
+
+/// 已选打印机总数（多盘=各启用盘绑定数之和）。
+int _selectedPrinterCount(BatchPrintState state) {
+  if (state.multiPlateMode) {
+    return state.assignments.fold<int>(
+        0, (s, a) => s + (a.enabled ? a.printerSns.length : 0));
+  }
+  return state.selectedSns.length;
+}
+
+/// 多盘投产前确认列表：按盘分组展示各盘绑定的打印机。
+class _MultiSelectedList extends StatelessWidget {
+  final List<PlateAssignment> assignments;
+  final Map<String, FarmPrinterState> bySn;
+
+  const _MultiSelectedList({required this.assignments, required this.bySn});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = assignments.where((a) => a.enabled).toList();
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+          child: Row(
+            children: [
+              Icon(Icons.rocket_launch_outlined,
+                  size: 20, color: Colors.grey.shade400),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  enabled.isEmpty
+                      ? '尚未为任何盘选择打印机（请返回配置）'
+                      : '共 ${enabled.length} 盘，确认各盘绑定的打印机后投产',
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w500),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            children: [
+              for (final a in enabled) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+                  child: Text('盘 ${a.plateId} · ${a.name}（${a.printerSns.length} 台）',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                          fontWeight: FontWeight.w600)),
+                ),
+                for (final sn in a.printerSns)
+                  _PrinterRow(sn: sn, printer: bySn[sn]),
+                const Divider(height: 1, indent: 56),
+              ],
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

@@ -59,7 +59,11 @@ class ProductStep extends ConsumerWidget {
             ),
           ] else ...[
             const SizedBox(height: 16),
-            _ParsedArea(state: state, onSelectPlate: notifier.selectPlate),
+            _ParsedArea(
+              state: state,
+              onSelectPlate: notifier.selectPlate,
+              onToggleMultiMode: notifier.setMultiPlateMode,
+            ),
           ],
         ],
       ),
@@ -71,8 +75,13 @@ class ProductStep extends ConsumerWidget {
 class _ParsedArea extends StatelessWidget {
   final BatchPrintState state;
   final ValueChanged<int> onSelectPlate;
+  final ValueChanged<bool> onToggleMultiMode;
 
-  const _ParsedArea({required this.state, required this.onSelectPlate});
+  const _ParsedArea({
+    required this.state,
+    required this.onSelectPlate,
+    required this.onToggleMultiMode,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -133,6 +142,8 @@ class _ParsedArea extends StatelessWidget {
       images: state.previewImages,
       selectedPlateId: state.printPlate,
       onSelect: onSelectPlate,
+      multiPlateMode: state.multiPlateMode,
+      onToggleMultiMode: onToggleMultiMode,
     );
   }
 }
@@ -143,12 +154,16 @@ class _ParsedPanel extends StatelessWidget {
   final Map<String, Uint8List> images;
   final int selectedPlateId;
   final ValueChanged<int> onSelect;
+  final bool multiPlateMode;
+  final ValueChanged<bool> onToggleMultiMode;
 
   const _ParsedPanel({
     required this.meta,
     required this.images,
     required this.selectedPlateId,
     required this.onSelect,
+    required this.multiPlateMode,
+    required this.onToggleMultiMode,
   });
 
   @override
@@ -195,18 +210,89 @@ class _ParsedPanel extends StatelessWidget {
           _FilamentChips(filaments: prof.filaments),
           const SizedBox(height: 16),
         ],
-        // 各盘（点选其一作为本次打印盘，其耗材将带入下一步）
-        Text('打印盘（${prof.partitions.length}）· 点击选择要打印的盘',
-            style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 8),
-        for (final pt in prof.partitions) ...[
-          _PlateTile(
-            partition: pt,
-            images: images,
-            isSelected: pt.id == selectedPlateId,
-            onTap: () => onSelect(pt.id),
+        // 多盘同打开关（仅 >1 盘时显示）
+        if (prof.partitions.length > 1) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: multiPlateMode
+                  ? const Color(0xFFE8F0FE)
+                  : Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                  color: multiPlateMode
+                      ? const Color(0xFF0C63E2)
+                      : Colors.grey.shade300),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.dynamic_feed,
+                    size: 18,
+                    color: multiPlateMode
+                        ? const Color(0xFF0C63E2)
+                        : Colors.grey.shade600),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('多盘同打',
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      Text(
+                          multiPlateMode
+                              ? '已开启：下一步为每盘分别配置打印机与耗材'
+                              : '开启后可让不同盘打印到不同打印机',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: multiPlateMode,
+                  onChanged: onToggleMultiMode,
+                ),
+              ],
+            ),
           ),
+          const SizedBox(height: 12),
+        ],
+        // 盘列表：单盘模式点选其一；多盘模式改为提示去下一步配置。
+        if (multiPlateMode)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline,
+                    size: 16, color: Colors.grey.shade500),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '共 ${prof.partitions.length} 盘，点击「下一步」为每盘配置打印机与耗材',
+                    style:
+                        TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else ...[
+          Text('打印盘（${prof.partitions.length}）· 点击选择要打印的盘',
+              style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey,
+                  fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
+          for (final pt in prof.partitions) ...[
+            _PlateTile(
+              partition: pt,
+              images: images,
+              isSelected: pt.id == selectedPlateId,
+              onTap: () => onSelect(pt.id),
+            ),
+            const SizedBox(height: 8),
+          ],
         ],
       ],
     );

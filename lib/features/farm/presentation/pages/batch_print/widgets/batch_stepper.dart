@@ -14,7 +14,7 @@ class BatchStepper extends ConsumerWidget {
     final state = ref.watch(batchPrintProvider(args));
     final notifier = ref.read(batchPrintProvider(args).notifier);
     final currentStep = state.currentStep;
-    final steps = ['选择产品', '确认材料', '选择设备', '执行投产'];
+    final steps = state.effectiveSteps;
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
@@ -39,7 +39,7 @@ class BatchStepper extends ConsumerWidget {
             ],
             _StepCircle(
               step: i + 1,
-              label: steps[i],
+              label: steps[i].label,
               isActive: i == currentStep,
               isDone: i < currentStep,
               enabled: state.canGoTo(i),
