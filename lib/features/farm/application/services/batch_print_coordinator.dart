@@ -95,6 +95,11 @@ class BatchPrintCoordinator {
   Uint8List? _lastFileBytes;
   String? _lastPrePrintGcode;
 
+  /// 多盘同打缓存：每台打印机各自打印的盘号 / 耗材映射 G-code（key = sn）。
+  /// 协调器为单例 Provider，缓存跨页面留存，供 retryFailed 复用。
+  Map<String, int>? _lastPlateBySn;
+  Map<String, String?>? _lastGcodeBySn;
+
   final StreamController<BatchPrintPrinterUpdate> _updateController =
       StreamController<BatchPrintPrinterUpdate>.broadcast();
   final StreamController<BatchPrintProgress> _progressController =
@@ -123,6 +128,8 @@ class BatchPrintCoordinator {
     required FarmCommandGateway gateway,
     int printPlate = 1,
     String? prePrintGcode,
+    Map<String, int>? plateBySn,
+    Map<String, String?>? gcodeBySn,
   }) async {
     _reset();
 
@@ -144,6 +151,9 @@ class BatchPrintCoordinator {
     _lastFileName = remoteFileName;
     _lastFileBytes = Uint8List.fromList(fileBytes);
     _lastPrePrintGcode = prePrintGcode;
+    // 多盘同打：缓存按打印机的盘号 / 耗材映射（单盘时为 null，retry 走兜底值）。
+    _lastPlateBySn = plateBySn;
+    _lastGcodeBySn = gcodeBySn;
 
     _queuedCount = printerSns.length;
     for (final sn in printerSns) {
@@ -163,16 +173,19 @@ class BatchPrintCoordinator {
     final futures = <Future<void>>[];
 
     for (final sn in printerSns) {
+      // 多盘同打：按打印机解析其打印盘号与耗材映射；缺省回退全局值。
+      final plate = plateBySn?[sn] ?? printPlate;
+      final gcode = gcodeBySn?[sn] ?? prePrintGcode;
       futures.add(_runPrinterPipeline(
         sn: sn,
         connectionInfo: connectionInfo,
         fileName: remoteFileName,
         fileType: fileType,
-        printPlate: printPlate,
+        printPlate: plate,
         fileBytes: fileBytes,
         semaphore: semaphore,
         gateway: gateway,
-        prePrintGcode: prePrintGcode,
+        prePrintGcode: gcode,
       ));
     }
 
@@ -195,6 +208,8 @@ class BatchPrintCoordinator {
   Future<void> retryFailed({
     required FarmCommandGateway gateway,
     int printPlate = 1,
+    Map<String, int>? plateBySn,
+    Map<String, String?>? gcodeBySn,
   }) async {
     if (_failedSns.isEmpty) return;
     if (_lastConnectionInfo == null ||
@@ -222,16 +237,19 @@ class BatchPrintCoordinator {
     final futures = <Future<void>>[];
 
     for (final sn in failedCopy) {
+      // 多盘重试：优先用传入映射，其次用 execute 缓存，最后回退单盘兜底值。
+      final plate = plateBySn?[sn] ?? _lastPlateBySn?[sn] ?? printPlate;
+      final gcode = gcodeBySn?[sn] ?? _lastGcodeBySn?[sn] ?? _lastPrePrintGcode;
       futures.add(_runPrinterPipeline(
         sn: sn,
         connectionInfo: _lastConnectionInfo!,
         fileName: _lastFileName!,
         fileType: fileType,
-        printPlate: printPlate,
+        printPlate: plate,
         fileBytes: _lastFileBytes!,
         semaphore: semaphore,
         gateway: gateway,
-        prePrintGcode: _lastPrePrintGcode,
+        prePrintGcode: gcode,
       ));
     }
 
@@ -349,17 +367,20 @@ class BatchPrintCoordinator {
 
       _transition(sn, BatchPrintPrinterState.startingPrint);
       final printStart = DateTime.now();
+
+      final printParams = {
+        'type': fileType,
+        'path': fileName,
+        'print_plate': printPlate,
+      };
       debugPrint(
-          '[BatchPrint] $sn: 🖨️ 发送打印命令 type=$fileType path=$fileName plate=$printPlate');
+          '[BatchPrint] $sn: 🖨️ 发送打印命令 method=server.files.start_local_print');
+      debugPrint('[BatchPrint] $sn:    params=$printParams');
 
       final printResult = await gateway.sendToOne(
         sn: sn,
         method: 'server.files.start_local_print',
-        params: {
-          'type': fileType,
-          'path': fileName,
-          'print_plate': printPlate,
-        },
+        params: printParams,
       );
 
       final printElapsed = DateTime.now().difference(printStart);
