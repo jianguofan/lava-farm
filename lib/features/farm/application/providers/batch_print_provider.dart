@@ -343,7 +343,8 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       debugPrint('[BatchPrint] 3MF解析完成: ${plates.length}盘');
       for (var i = 0; i < plates.length; i++) {
         final p = plates[i];
-        debugPrint('  [索引$i] 盘ID=${p.id}, 名称="${p.name}", filaments=${p.filaments.length}');
+        debugPrint('  [索引$i] 盘ID=${p.id}, 名称="${p.name}", '
+            'filaments=${p.filaments.length}, weight=${p.weight}g, secs=${p.secs}s');
       }
       debugPrint('[BatchPrint] 默认选中盘ID: $plateId');
 
