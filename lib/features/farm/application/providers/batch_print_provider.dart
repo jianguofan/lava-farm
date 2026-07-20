@@ -341,10 +341,11 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       final plateId = plates.isNotEmpty ? plates.first.id : state.printPlate;
 
       debugPrint('[BatchPrint] 3MF解析完成: ${plates.length}盘');
-      for (final p in plates) {
-        debugPrint('  盘${p.id}: ${p.name}, filaments=${p.filaments.length}');
+      for (var i = 0; i < plates.length; i++) {
+        final p = plates[i];
+        debugPrint('  [索引$i] 盘ID=${p.id}, 名称="${p.name}", filaments=${p.filaments.length}');
       }
-      debugPrint('[BatchPrint] 默认选中盘: $plateId');
+      debugPrint('[BatchPrint] 默认选中盘ID: $plateId');
 
       state = state.copyWith(
         parsed3mf: result.meta,
@@ -527,6 +528,7 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   /// （耗材自动匹配、空打印机、全部启用），并钳制 currentStep。
   /// 关闭则清空配置、回单盘（重选第一盘）。
   void setMultiPlateMode(bool value) {
+    debugPrint('[BatchPrint] 切换多盘模式: $value (当前printPlate=${state.printPlate})');
     if (value == state.multiPlateMode) return;
     if (value) {
       final partitions =
@@ -547,9 +549,11 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
         assignments: assignments,
         currentStep: state.currentStep > 1 ? 1 : state.currentStep,
       );
+      debugPrint('[BatchPrint] 多盘模式已开启，生成${assignments.length}个盘配置');
     } else {
       final first = state.parsed3mf?.profiles.firstOrNull?.partitions.firstOrNull;
       final plateId = first?.id ?? state.printPlate;
+      debugPrint('[BatchPrint] 关闭多盘模式，切换到盘$plateId');
       state = state.copyWith(
         multiPlateMode: false,
         assignments: const [],
