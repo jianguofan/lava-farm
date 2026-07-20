@@ -928,8 +928,9 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   }
 
   void clearSnackbar() {
-    if (state.snackbarMessage != null)
+    if (state.snackbarMessage != null) {
       state = state.copyWith(snackbarMessage: null);
+    }
   }
 
   @override
@@ -992,6 +993,7 @@ Future<_Parsed3mf> _parse3mfInIsolate(String path) async {
 }
 
 /// #RRGGBB / #AARRGGBB → ARGB int，解析失败回退中性灰。
+/// 对暗色进行亮度提升，确保显示为亮色。
 int _argbFromHex(String? hex) {
   if (hex == null || hex.isEmpty) return 0xFF9E9E9E;
   var h = hex.replaceFirst('#', '');
@@ -1000,5 +1002,25 @@ int _argbFromHex(String? hex) {
   } else if (h.length != 8) {
     return 0xFF9E9E9E;
   }
-  return int.tryParse(h, radix: 16) ?? 0xFF9E9E9E;
+  final parsed = int.tryParse(h, radix: 16);
+  if (parsed == null) return 0xFF9E9E9E;
+
+  // 提取 ARGB 分量
+  final a = (parsed >> 24) & 0xFF;
+  var r = (parsed >> 16) & 0xFF;
+  var g = (parsed >> 8) & 0xFF;
+  var b = parsed & 0xFF;
+
+  // 计算亮度 (使用感知亮度公式)
+  final brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+
+  // 如果亮度低于阈值（暗色），则提升亮度
+  if (brightness < 128) {
+    final factor = 128 / brightness.clamp(1, 255);
+    r = (r * factor).clamp(0, 255).toInt();
+    g = (g * factor).clamp(0, 255).toInt();
+    b = (b * factor).clamp(0, 255).toInt();
+  }
+
+  return (a << 24) | (r << 16) | (g << 8) | b;
 }
