@@ -11,6 +11,7 @@ import 'dart:async';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:parse_3mf/parse_gcode.dart';
 import 'package:parse_3mf/parse_3mf.dart';
 
 import '../services/batch_print_coordinator.dart';
@@ -311,18 +312,18 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       if (xfile == null) return;
       if (!mounted) return;
 
-      final is3mf = xfile.name.toLowerCase().endsWith('.3mf');
+      final canParseMetadata = _isSupportedMetadataFile(xfile.name);
       state = state.copyWith(
         filePath: xfile.path,
         fileName: xfile.name,
         parsed3mf: null,
         previewImages: const {},
         parseError: null,
-        isParsing: is3mf,
+        isParsing: canParseMetadata,
       );
-      // 仅 .3mf 是 ZIP 结构，可解析出元数据与预览图；GCode 等保持原行为。
-      if (is3mf) {
-        await _parse3mf(xfile.path);
+      // .3mf 与裸 G-code 都尝试解析元数据，用于展示基础信息与自动生成耗材。
+      if (canParseMetadata) {
+        await _parsePrintFile(xfile.path);
       }
     } catch (e) {
       if (!mounted) return;
@@ -330,17 +331,17 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
     }
   }
 
-  /// 后台解析 .3mf：结构化元数据 + 预览图字节，写入 state 供 UI 展示。
-  /// 大文件（含 35MB+ 几何体）的同步 ZIP 读取放在 isolate 中，避免阻塞 UI。
-  Future<void> _parse3mf(String path) async {
+  /// 后台解析打印文件：结构化元数据 + 预览图字节，写入 state 供 UI 展示。
+  /// 大文件（含 35MB+ 几何体）的同步 ZIP/G-code 读取放在 isolate 中，避免阻塞 UI。
+  Future<void> _parsePrintFile(String path) async {
     try {
-      final result = await compute(_parse3mfInIsolate, path);
+      final result = await compute(_parsePrintFileInIsolate, path);
       if (!mounted) return;
       // 解析完成默认选中第一盘，据此回填耗材并自动匹配打印头。
       final plates = result.meta.profiles.firstOrNull?.partitions ?? const [];
       final plateId = plates.isNotEmpty ? plates.first.id : state.printPlate;
 
-      debugPrint('[BatchPrint] 3MF解析完成: ${plates.length}盘');
+      debugPrint('[BatchPrint] 文件解析完成: ${plates.length}盘');
       for (var i = 0; i < plates.length; i++) {
         final p = plates[i];
         debugPrint('  [索引$i] 盘ID=${p.id}, 名称="${p.name}", '
@@ -358,7 +359,7 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       );
     } catch (e) {
       if (!mounted) return;
-      state = state.copyWith(isParsing: false, parseError: '3MF 解析失败: $e');
+      state = state.copyWith(isParsing: false, parseError: '文件解析失败: $e');
     }
   }
 
@@ -379,9 +380,8 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
     final profile = meta?.profiles.firstOrNull;
     if (profile == null) return const [];
 
-    final partition = profile.partitions
-        .where((p) => p.id == plateId)
-        .firstOrNull;
+    final partition =
+        profile.partitions.where((p) => p.id == plateId).firstOrNull;
 
     // 优先使用盘级耗材；若为空则回退到全局耗材
     final filaments = (partition != null && partition.filaments.isNotEmpty)
@@ -529,7 +529,8 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   /// （耗材自动匹配、空打印机、全部启用），并钳制 currentStep。
   /// 关闭则清空配置、回单盘（重选第一盘）。
   void setMultiPlateMode(bool value) {
-    debugPrint('[BatchPrint] 切换多盘模式: $value (当前printPlate=${state.printPlate})');
+    debugPrint(
+        '[BatchPrint] 切换多盘模式: $value (当前printPlate=${state.printPlate})');
     if (value == state.multiPlateMode) return;
     if (value) {
       final partitions =
@@ -552,7 +553,8 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       );
       debugPrint('[BatchPrint] 多盘模式已开启，生成${assignments.length}个盘配置');
     } else {
-      final first = state.parsed3mf?.profiles.firstOrNull?.partitions.firstOrNull;
+      final first =
+          state.parsed3mf?.profiles.firstOrNull?.partitions.firstOrNull;
       final plateId = first?.id ?? state.printPlate;
       debugPrint('[BatchPrint] 关闭多盘模式，切换到盘$plateId');
       state = state.copyWith(
@@ -596,28 +598,32 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
   /// 给某盘第 [materialIndex] 条耗材指定打印头 [head]（1-based）。
   void assignPlateHead(int plateId, int materialIndex, int head) {
     state = state.copyWith(
-        assignments:
-            _withPlateMaterial(plateId, materialIndex, (m) => m.copyWith(assignedHead: head)));
+        assignments: _withPlateMaterial(
+            plateId, materialIndex, (m) => m.copyWith(assignedHead: head)));
   }
 
   /// 清除某盘第 [materialIndex] 条耗材的打印头分配。
   /// 注意：[ProductMaterial.copyWith] 无法把字段置回 null，这里必须重建对象。
   void clearPlateHead(int plateId, int materialIndex) {
     state = state.copyWith(
-        assignments: _withPlateMaterial(plateId, materialIndex, (m) => ProductMaterial(
-              colorName: m.colorName,
-              argb: m.argb,
-              grams: m.grams,
-              extruderIndex: m.extruderIndex,
-              assignedHead: null,
-            )));
+        assignments: _withPlateMaterial(
+            plateId,
+            materialIndex,
+            (m) => ProductMaterial(
+                  colorName: m.colorName,
+                  argb: m.argb,
+                  grams: m.grams,
+                  extruderIndex: m.extruderIndex,
+                  assignedHead: null,
+                )));
   }
 
   /// 对某盘耗材重新自动匹配打印头。
   void autoMatchPlate(int plateId) {
     final list = state.assignments
-        .map((a) =>
-            a.plateId == plateId ? a.copyWith(materials: _autoMatch(a.materials)) : a)
+        .map((a) => a.plateId == plateId
+            ? a.copyWith(materials: _autoMatch(a.materials))
+            : a)
         .toList();
     state = state.copyWith(assignments: list);
   }
@@ -907,8 +913,7 @@ class BatchPrintNotifier extends StateNotifier<BatchPrintState> {
       List<PlateAssignment> plates, List<String> validSns) async {
     final start = state.execStartTime;
     if (start == null) return;
-    final baseName =
-        state.selectedProduct?.displayName ?? state.fileName ?? '';
+    final baseName = state.selectedProduct?.displayName ?? state.fileName ?? '';
     final finishedAt = DateTime.now();
 
     for (final a in plates) {
@@ -977,28 +982,33 @@ final batchPrintProvider = StateNotifierProvider.autoDispose
 final batchPrintStepProvider = Provider.autoDispose.family<int, BatchPrintArgs>(
     (ref, args) => ref.watch(batchPrintProvider(args)).currentStep);
 
+/// 打印文件是否支持解析元数据。
+bool _isSupportedMetadataFile(String path) {
+  final lower = path.toLowerCase();
+  return lower.endsWith('.3mf') || _isBareGcodeFile(path);
+}
+
+bool _isBareGcodeFile(String path) {
+  final lower = path.toLowerCase();
+  return lower.endsWith('.gcode') ||
+      lower.endsWith('.g') ||
+      lower.endsWith('.gco');
+}
+
 // --------------------------------------------------------------------------- //
-// 3MF 解析（后台 isolate 执行）—— 顶层函数 + 纯数据结果类，可跨 isolate 传递。
+// 打印文件解析（后台 isolate 执行）—— 顶层函数 + 纯数据结果类，可跨 isolate 传递。
 // --------------------------------------------------------------------------- //
 
 /// 解析结果载体：字段均为可跨 isolate 拷贝的纯数据。
-class _Parsed3mf {
-  const _Parsed3mf(this.meta, this.images);
+class _ParsedPrintFile {
+  const _ParsedPrintFile(this.meta, this.images);
   final Metadata meta;
   final Map<String, Uint8List>
-      images; // key = zip 内相对路径（如 Metadata/plate_1.png）
+      images; // key = zip/输出目录内相对路径（如 Metadata/plate_1.png）
 }
 
-/// 在后台 isolate 中解析 .3mf：返回结构化元数据与引用到的预览图字节。
-/// 顶层函数，供 [compute] 调用。
-Future<_Parsed3mf> _parse3mfInIsolate(String path) async {
-  final src = openSource(path);
-  // 切片器导出的 .3mf 自带 slice_info.config：同一归档同时作为 gcode 包传入，
-  // 即可补齐各盘 used_g / weight / secs 与 per-plate filaments（耗材→打印头映射依据）。
-  final gcode = src.has('Metadata/slice_info.config') ? src : null;
-  final meta = buildMetadata(src, gcode);
-
-  // 收集 profile / 各盘引用到的预览图，惰性解压取字节（单张都不大）。
+/// 收集 profile / 各盘引用到的预览图路径。
+Set<String> _collectPreviewRefs(Metadata meta) {
   final wanted = <String>{};
   for (final prof in meta.profiles) {
     wanted.addAll(prof.pics);
@@ -1006,8 +1016,42 @@ Future<_Parsed3mf> _parse3mfInIsolate(String path) async {
       wanted.addAll(pt.pics);
     }
   }
+  return wanted;
+}
+
+/// 在后台 isolate 中解析 .3mf / 裸 G-code：返回结构化元数据与引用到的预览图字节。
+/// 顶层函数，供 [compute] 调用。
+Future<_ParsedPrintFile> _parsePrintFileInIsolate(String path) async {
+  if (_isBareGcodeFile(path)) {
+    final outDir = await Directory.systemTemp.createTemp('lava_gcode_preview_');
+    try {
+      final meta = await parseGcodeToMetadata(path, outDir: outDir.path);
+      final images = <String, Uint8List>{};
+      for (final rel in _collectPreviewRefs(meta)) {
+        final file = File('${outDir.path}/$rel');
+        if (file.existsSync()) {
+          images[rel] = await file.readAsBytes();
+        }
+      }
+      return _ParsedPrintFile(meta, images);
+    } finally {
+      try {
+        await outDir.delete(recursive: true);
+      } catch (_) {
+        // 临时预览目录清理失败不影响解析结果。
+      }
+    }
+  }
+
+  final src = openSource(path);
+  // 切片器导出的 .3mf 自带 slice_info.config：同一归档同时作为 gcode 包传入，
+  // 即可补齐各盘 used_g / weight / secs 与 per-plate filaments（耗材→打印头映射依据）。
+  final gcode = src.has('Metadata/slice_info.config') ? src : null;
+  final meta = buildMetadata(src, gcode);
+
+  // 收集 profile / 各盘引用到的预览图，惰性解压取字节（单张都不大）。
   final images = <String, Uint8List>{};
-  for (final rel in wanted) {
+  for (final rel in _collectPreviewRefs(meta)) {
     if (!src.has(rel)) continue;
     try {
       images[rel] = Uint8List.fromList(src.read(rel));
@@ -1015,7 +1059,7 @@ Future<_Parsed3mf> _parse3mfInIsolate(String path) async {
       // 单张图缺失不影响整体解析。
     }
   }
-  return _Parsed3mf(meta, images);
+  return _ParsedPrintFile(meta, images);
 }
 
 /// #RRGGBB / #AARRGGBB → ARGB int，解析失败回退中性灰。

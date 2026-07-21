@@ -9,7 +9,7 @@ import '../../../../application/providers/batch_print_provider.dart';
 
 /// Step1：产品 / 文件选择。
 ///
-/// 选择 .3mf 后会调用 [parse_3mf] 解析出结构化元数据 + 预览图，直接在页面展示。
+/// 选择 .3mf / GCode 后会调用 [parse_3mf] 解析出结构化元数据 + 预览图，直接在页面展示。
 class ProductStep extends ConsumerWidget {
   final BatchPrintArgs args;
 
@@ -37,8 +37,10 @@ class ProductStep extends ConsumerWidget {
               Expanded(
                 child: fileName != null
                     ? Chip(
-                        avatar: const Icon(Icons.check_circle, size: 18, color: Colors.green),
-                        label: Text(fileName, style: const TextStyle(fontSize: 13)),
+                        avatar: const Icon(Icons.check_circle,
+                            size: 18, color: Colors.green),
+                        label: Text(fileName,
+                            style: const TextStyle(fontSize: 13)),
                         onDeleted: isExecuting ? null : notifier.clearFile,
                       )
                     : OutlinedButton.icon(
@@ -85,18 +87,6 @@ class _ParsedArea extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 仅 .3mf 是可解析的 ZIP 结构；GCode 等不做解析。
-    final is3mf = state.fileName!.toLowerCase().endsWith('.3mf');
-    if (!is3mf) {
-      return Row(
-        children: [
-          const Icon(Icons.check_circle_outline, size: 18, color: Colors.green),
-          const SizedBox(width: 8),
-          Text('文件已选择（GCode 无预览，可直接下一步）',
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
-        ],
-      );
-    }
     if (state.isParsing) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 32),
@@ -106,7 +96,8 @@ class _ParsedArea extends StatelessWidget {
             children: [
               CircularProgressIndicator(strokeWidth: 2),
               SizedBox(height: 12),
-              Text('正在解析 3MF…', style: TextStyle(fontSize: 13, color: Colors.grey)),
+              Text('正在解析文件…',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
             ],
           ),
         ),
@@ -135,7 +126,8 @@ class _ParsedArea extends StatelessWidget {
     }
     final meta = state.parsed3mf;
     if (meta == null || meta.profiles.isEmpty) {
-      return Text('未解析到内容', style: TextStyle(fontSize: 13, color: Colors.grey.shade500));
+      return Text('未解析到内容',
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade500));
     }
     return _ParsedPanel(
       meta: meta,
@@ -146,6 +138,11 @@ class _ParsedArea extends StatelessWidget {
       onToggleMultiMode: onToggleMultiMode,
     );
   }
+}
+
+String? _mainPreviewPic(List<String> pics) {
+  if (pics.isEmpty) return null;
+  return pics.where((p) => !p.contains('_small')).lastOrNull ?? pics.last;
 }
 
 /// 解析结果面板：主预览图 + 摘要 + 耗材色块 + 各盘列表。
@@ -169,7 +166,7 @@ class _ParsedPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final prof = meta.profiles.first;
-    final mainPic = prof.pics.isEmpty ? null : prof.pics.first;
+    final mainPic = _mainPreviewPic(prof.pics);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -183,7 +180,8 @@ class _ParsedPanel extends StatelessWidget {
                 meta.name ?? prof.name ?? '3MF 模型',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
               ),
             ),
             TextButton.icon(
@@ -198,14 +196,19 @@ class _ParsedPanel extends StatelessWidget {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _PreviewBox(bytes: mainPic == null ? null : images[mainPic], size: 150),
+            _PreviewBox(
+                bytes: mainPic == null ? null : images[mainPic], size: 150),
             const SizedBox(width: 16),
             Expanded(child: _SummaryGrid(prof: prof)),
           ],
         ),
         const SizedBox(height: 12),
         if (prof.filaments.isNotEmpty) ...[
-          const Text('耗材', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
+          const Text('耗材',
+              style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey,
+                  fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
           _FilamentChips(filaments: prof.filaments),
           const SizedBox(height: 16),
@@ -264,14 +267,12 @@ class _ParsedPanel extends StatelessWidget {
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Row(
               children: [
-                Icon(Icons.info_outline,
-                    size: 16, color: Colors.grey.shade500),
+                Icon(Icons.info_outline, size: 16, color: Colors.grey.shade500),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     '共 ${prof.partitions.length} 盘，点击「下一步」为每盘配置打印机与耗材',
-                    style:
-                        TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                 ),
               ],
@@ -326,12 +327,18 @@ class _SummaryGrid extends StatelessWidget {
       child: Column(
         children: [
           Row(children: [
-            Expanded(child: _Info(label: '喷嘴', value: nozzle.isEmpty ? '—' : '${nozzle}mm')),
-            Expanded(child: _Info(label: '盘数', value: '${prof.partitions.length}')),
+            Expanded(
+                child: _Info(
+                    label: '喷嘴', value: nozzle.isEmpty ? '—' : '${nozzle}mm')),
+            Expanded(
+                child: _Info(label: '盘数', value: '${prof.partitions.length}')),
           ]),
           const SizedBox(height: 4),
           Row(children: [
-            Expanded(child: _Info(label: '总重', value: prof.weight == null ? '—' : '${prof.weight}g')),
+            Expanded(
+                child: _Info(
+                    label: '总重',
+                    value: prof.weight == null ? '—' : '${prof.weight}g')),
             Expanded(child: _Info(label: '预估时长', value: _fmtDuration(secs))),
           ]),
         ],
@@ -357,7 +364,8 @@ class _Info extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Text('$label：', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+        Text('$label：',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
         Expanded(
           child: Text(
             value,
@@ -454,13 +462,16 @@ class _PlateTile extends StatelessWidget {
                     'Plate ${partition.id} · ${partition.name}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     [
-                      if (partition.extras.bedType != null) partition.extras.bedType,
-                      if (partition.filaments.isNotEmpty) '${partition.filaments.length} 色',
+                      if (partition.extras.bedType != null)
+                        partition.extras.bedType,
+                      if (partition.filaments.isNotEmpty)
+                        '${partition.filaments.length} 色',
                       if (partition.weight != null) '${partition.weight}g',
                       if (partition.secs != null) '${partition.secs! ~/ 60}m',
                     ].join(' · '),
@@ -501,12 +512,15 @@ class _PreviewBox extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: bytes == null
-          ? Center(child: Icon(Icons.image, size: size * 0.3, color: Colors.grey.shade400))
+          ? Center(
+              child: Icon(Icons.image,
+                  size: size * 0.3, color: Colors.grey.shade400))
           : Image.memory(
               bytes!,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  Center(child: Icon(Icons.broken_image, size: size * 0.3, color: Colors.grey.shade400)),
+              errorBuilder: (_, __, ___) => Center(
+                  child: Icon(Icons.broken_image,
+                      size: size * 0.3, color: Colors.grey.shade400)),
             ),
     );
   }
@@ -539,7 +553,8 @@ class _JsonDialog extends StatelessWidget {
           child: SingleChildScrollView(
             child: SelectableText(
               json,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12, height: 1.4),
+              style: const TextStyle(
+                  fontFamily: 'monospace', fontSize: 12, height: 1.4),
             ),
           ),
         ),
