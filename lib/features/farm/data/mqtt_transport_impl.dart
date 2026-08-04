@@ -5,6 +5,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:mqtt_client/mqtt_client.dart' as mqtt;
@@ -28,6 +29,20 @@ class MqttTransportImpl implements MqttTransportAdapter {
 
   @override
   DateTime? lastMessageTime;
+
+  /// 每个 App 实例的唯一标识（8 位随机 hex），追加到 MQTT clientId，
+  /// 使同一用户名的多个客户端可以同时连接同一个 Broker 而不互相踢下线。
+  static final String _instanceSuffix = _generateInstanceSuffix();
+
+  static String _generateInstanceSuffix() {
+    final r = Random.secure();
+    final bytes = List<int>.generate(4, (_) => r.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  /// 唯一 Client ID：username + 实例后缀，保证每个 App 实例在 Broker 上唯一。
+  /// 认证仍然使用原始 username/password，不受影响。
+  String get _uniqueClientId => '${_config.username}_$_instanceSuffix';
 
   MqttTransportImpl(this._config);
 
@@ -73,15 +88,18 @@ class MqttTransportImpl implements MqttTransportAdapter {
     };
 
     // 连接消息配置
+    // clientId 使用唯一后缀，使多个 App 实例可同时连接同一 Broker 而不互相踢下线。
+    // 认证仍使用原始 username/password，不受影响。
+    // Will Topic 也使用唯一 clientId，避免多实例间的遗嘱消息冲突。
     final connMsg = mqtt.MqttConnectMessage()
-        .withClientIdentifier(_config.username)
+        .withClientIdentifier(_uniqueClientId)
         .authenticateAs(_config.username, _config.password)
-        .withWillTopic('${_config.username}/notification')
+        .withWillTopic('$_uniqueClientId/notification')
         .withWillMessage('{"server":"offline"}')
         .startClean();
 
     client.connectionMessage = connMsg;
-    print('[MQTT] 连接消息已配置: clientId=${_config.username} keepAlive=120');
+    print('[MQTT] 连接消息已配置: clientId=$_uniqueClientId keepAlive=120');
 
     try {
       print('[MQTT] 调用 client.connect()...');
