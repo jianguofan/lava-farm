@@ -1,0 +1,130 @@
+[
+  {
+    "id": "1784545816480980",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061510231Z7AM",
+      "8110026061510388EOCM",
+      "8110026061610062DYQN"
+    ],
+    "successCount": 2,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-20T19:10:12.347572",
+    "finishedAt": "2026-07-20T19:10:16.480980"
+  },
+  {
+    "id": "1784545404994357_1",
+    "productId": "",
+    "productName": "mac-box.gcode.3mf · 盘1",
+    "fileName": "mac-box.gcode.3mf",
+    "printerSns": [
+      "8110026061510388EOCM"
+    ],
+    "successCount": 1,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-20T19:03:13.349384",
+    "finishedAt": "2026-07-20T19:03:24.994357"
+  },
+  {
+    "id": "1784545404994357_2",
+    "productId": "",
+    "productName": "mac-box.gcode.3mf · 盘2",
+    "fileName": "mac-box.gcode.3mf",
+    "printerSns": [
+      "8110026061610062DYQN"
+    ],
+    "successCount": 1,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 2,
+    "startedAt": "2026-07-20T19:03:13.349384",
+    "finishedAt": "2026-07-20T19:03:24.994357"
+  },
+  {
+    "id": "1784545256313454",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061510388EOCM",
+      "8110026061510231Z7AM",
+      "8110026061610062DYQN"
+    ],
+    "successCount": 2,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-20T19:00:51.374568",
+    "finishedAt": "2026-07-20T19:00:56.313454"
+  },
+  {
+    "id": "1784544797222867",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061510231Z7AM",
+      "8110026061510388EOCM"
+    ],
+    "successCount": 1,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-20T18:53:15.166435",
+    "finishedAt": "2026-07-20T18:53:17.222867"
+  },
+  {
+    "id": "1784539281818504",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061610062DYQN"
+    ],
+    "successCount": 0,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-20T17:21:13.078537",
+    "finishedAt": "2026-07-20T17:21:21.818504"
+  },
+  {
+    "id": "1784172062138419",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061510231Z7AM",
+      "8110026061510388EOCM",
+      "8110026061610062DYQN"
+    ],
+    "successCount": 2,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-16T11:20:58.182337",
+    "finishedAt": "2026-07-16T11:21:02.138419"
+  },
+  {
+    "id": "1784168626550372",
+    "productId": "",
+    "productName": "四色盘.gcode.3mf",
+    "fileName": "四色盘.gcode.3mf",
+    "printerSns": [
+      "8110026061510231Z7AM",
+      "8110026061510388EOCM"
+    ],
+    "successCount": 1,
+    "failedCount": 0,
+    "failures": {},
+    "printPlate": 1,
+    "startedAt": "2026-07-16T10:23:44.316121",
+    "finishedAt": "2026-07-16T10:23:46.550372"
+  }
+]

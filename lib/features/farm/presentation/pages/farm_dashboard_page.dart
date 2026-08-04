@@ -63,7 +63,7 @@ class _FarmDashboardPageState extends ConsumerState<FarmDashboardPage> {
 
     try {
       await manager.connect(
-        host: '172.17.11.209',
+        host: '172.18.2.238',
         port: 1883,
         username: 'lava_app',
         password: 'lava-farm-admin',

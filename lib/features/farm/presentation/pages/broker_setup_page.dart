@@ -25,7 +25,7 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
   String? _errorMessage;
 
   // ── 表单 ──
-  final _hostController = TextEditingController(text: '172.17.11.209');
+  final _hostController = TextEditingController(text: '172.18.2.238');
   final _portController = TextEditingController(text: '1883');
   final _usernameController = TextEditingController(text: 'lava_app');
   final _passwordController = TextEditingController(text: 'lava-farm-admin');
@@ -270,5 +270,4 @@ class _BrokerSetupPageState extends ConsumerState<BrokerSetupPage> {
       setState(() => _errorMessage = '断开失败: $e');
     }
   }
-
 }

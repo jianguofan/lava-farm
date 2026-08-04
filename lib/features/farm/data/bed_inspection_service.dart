@@ -155,8 +155,8 @@ class BedInspectionService {
     // Phase 2: 并发下载+分析（semaphore=2，单台超时不阻塞其他）
     // 每台完成即经 onResult 上抛，UI 可逐台刷新而非整批等待。
     debugPrint(
-        '[BedInspection] Phase 2: 并发下载+分析 ${onlinePrinters.length} 台 (并发=2)…');
-    final semaphore = _Semaphore(2);
+        '[BedInspection] Phase 2: 并发下载+分析 ${onlinePrinters.length} 台 (并发=3)…');
+    final semaphore = _Semaphore(3);
     await Future.wait(
       onlinePrinters.map((printer) async {
         await semaphore.acquire();

@@ -1,0 +1,30 @@
+[
+  {
+    "index": 1,
+    "filamentType": "PLA",
+    "argb": 4294967295,
+    "nozzleDiameter": 0.4,
+    "enabled": true
+  },
+  {
+    "index": 2,
+    "filamentType": "PLA",
+    "argb": 4293918720,
+    "nozzleDiameter": 0.4,
+    "enabled": true
+  },
+  {
+    "index": 3,
+    "filamentType": "PLA",
+    "argb": 4281545523,
+    "nozzleDiameter": 0.4,
+    "enabled": true
+  },
+  {
+    "index": 4,
+    "filamentType": "PLA",
+    "argb": 4294940928,
+    "nozzleDiameter": 0.4,
+    "enabled": true
+  }
+]
